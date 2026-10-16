@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>どてらい金融 顧客管理システム</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="shop">浪速 どてらい金融</span>
+      <h1>顧客管理システム<small>30日勝負（仮）</small></h1>
+    </div>
+    <dl class="kpis" id="kpis"></dl>
+    <button class="ghost on-dark" data-act="reset" title="台帳を読み直して1日目からやり直す">最初から</button>
+  </header>
+
+  <nav class="tabs" id="tabs" aria-label="画面の切り替え"></nav>
+
+  <main class="view" id="view"></main>
+
+  <div class="scrim" id="scrim" data-act="close-drawer" hidden></div>
+  <aside class="drawer" id="drawer" tabindex="-1" aria-label="詳細" hidden></aside>
+
+  <footer class="bar">
+    <span class="hint" id="hint"></span>
+    <button class="primary" id="end" data-act="end">1日を終える ▶</button>
+  </footer>
+
+  <div class="overlay" id="result" hidden>
+    <div class="sheet" id="result-body"></div>
+  </div>
+
+  <div class="overlay" id="alloc" hidden>
+    <div class="sheet" id="alloc-body" role="dialog" aria-modal="true" aria-label="不明入金を充当する"></div>
+  </div>
+
+  <div class="overlay" id="loader" hidden>
+    <div class="sheet">
+      <h2>台帳を読み込めませんでした</h2>
+      <p>ファイルを直接開いた場合、ブラウザの制限で台帳を自動で読めません。<br>
+        同じフォルダの <code>customers.csv</code> を選んでください。</p>
+      <p>毎回選ぶのが面倒なら、<code>遊ぶ.command</code> をダブルクリックして起動してください。</p>
+      <input type="file" id="csv-file" accept=".csv,text/csv">
+      <p class="error" id="loader-error"></p>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="logic.js"></script>
+  <script src="ui.js"></script>
+</body>
+</html>
