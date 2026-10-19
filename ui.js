@@ -547,7 +547,7 @@
       </dl>
       <p class="verdict ${cls}">期日ごとの返済余力の目安：<b>${yen(lo)}〜${yen(hi)}</b>
         <small>（${p.investigated ? '調査済み・本当の月収から' : '自己申告の月収から。ウソかもしれません'}）</small><br>${verdict}</p>
-      <p class="help">期日は今日を1日目として数えます（ジャンプした日も1日目）。入金はジャンプ金に先に充当し、多い分で元金を詰めます。</p>`;
+      <p class="help">期日は今日を1日目として数え、そのあとは決まった間隔で並びます（遅れて払っても日付はずれません）。入金はジャンプ金に先に充当し、多い分で元金を詰めます。</p>`;
   }
 
   function riskOf(loan) {
@@ -574,6 +574,7 @@
       return `<div class="debtor">
         <div class="who">${custLink(c)} ${loanLink(loan)}
           <span>元金${yen(loan.principal)}・未払いジャンプ金${yen(loan.accrued)}・延滞${loan.overdueDays}日・弱み：${known ? esc(c.weakType) : '？？？'}</span>
+          <span class="sub">未払いジャンプ金を満額回収できればジャンプ成立。次回の期日は元の予定どおり${G.fmtDay(loan.due)}（足りなければ延滞のまま）</span>
           ${riskOf(loan)}</div>
         <div class="cmds">${cmds}</div>
       </div>`;
@@ -912,7 +913,8 @@
     const after = loan.principal - toP;
     let note = '';
     if (loan.principal - toP <= 0 && loan.accrued - toJump <= 0) note = 'この充当で完済になります。';
-    else if (loan.status === '延滞' && loan.accrued - toJump === 0) note = `延滞が解消し、今日を1日目として次回の期日を数え直します（${G.fmtDay(s.day + G.stepOf(loan.cycle))}）。`;
+    else if (loan.status === '延滞' && loan.accrued - toJump === 0) note = `ジャンプ金が満額そろってジャンプ成立。次回の期日は元の予定どおり${G.fmtDay(loan.due)}です（払った日から数え直しません）。`;
+    else if (loan.status === '延滞') note = `未払いジャンプ金があと${yen(loan.accrued - toJump)}残るので、ジャンプは成立せず延滞のままです。`;
     box.innerHTML = `<p class="breakdown">内訳：<b>ジャンプ(${num(toJump)})＋元金詰め(${num(toP)})</b></p>
       <dl class="quote-grid">
         <div><dt>充当前の元金</dt><dd>${yen(loan.principal)}</dd></div>
@@ -1145,7 +1147,7 @@
         <thead><tr><th>期日</th><th class="num">ジャンプ金</th><th class="num">完済金額</th></tr></thead>
         <tbody>${plan.map(({ d, e }) => `<tr><td>${dayLink(d)}</td><td class="num">${yen(e.jump)}</td><td class="num">${yen(e.payoff)}</td></tr>`).join('')}</tbody>
       </table></div><p class="help">2回目以降は、ジャンプ金だけ入れ続けた場合の見込みです。元金を詰めれば、その分ジャンプ金も下がります。</p>`
-        : `<p class="empty">${l.status === '延滞' ? '延滞中です。取り立てで回収できたら、その日を1日目として期日を数え直します。' : '30日目までの期日はありません。'}</p>`}
+        : `<p class="empty">${l.status === '延滞' ? `延滞中です。未払いジャンプ金 ${yen(l.accrued)} が満額そろえばジャンプ成立。次回の期日は元の予定どおり ${G.fmtDay(l.due)} です（払った日から数え直しません）。` : '30日目までの期日はありません。'}</p>`}
       <h3 class="sec">取引明細</h3>
       <div class="table-wrap"><table class="data compact passbook">
         <thead><tr><th>日付</th><th>内訳</th><th class="num">金額</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th class="num">元金残高</th><th class="num">未払いジャンプ金</th></tr></thead>

@@ -11,6 +11,9 @@
 //   貸した日・ジャンプした日を1日目と数える。10日に10Sで貸すと期日は19日、
 //   19日にジャンプすると次の期日は28日。つまり期日の間隔は S−1 日。
 //   1S だけは当日返済になってしまうので、翌日を期日にする（2S と同じ間隔）。
+//   期日は貸した日から決まった並び（10日・19日・28日…）で、払った日によってずれない。
+//   延滞した客が後日ジャンプ金を満額払ってジャンプしても、次回の期日は元の予定どおり
+//   （10日が期日で5日遅れて15日にジャンプしても、次は24日ではなく19日）。
 //   間隔は S−1 日でも、ジャンプ金は S 日分として計算する（10S なら10日分）。
 //
 // 不明入金
@@ -56,6 +59,7 @@
     rivalCost: 50000,
     windfallScale: 3,         // 大当たりのときの隠し資産の倍率
     windfallFlat: 200000,     // 隠し資産がないときの大当たり額
+    collectFullJump: false,   // true なら取り立て成功で未払いジャンプ金を必ず満額回収する（false：かき集めた額だけ。足りなければ延滞のまま）
     unknownChance: 0.07,      // 1日のうちに不明入金が入る確率（貸付があるとき）
     unknownMin: 5000,
     unknownMax: 30000,
@@ -396,7 +400,7 @@
     const c = customerOf(s, loan.customerId), p = s.people[c.id];
     // 取り消しのときに戻せるよう、充当前の状態を控えておく
     const before = {
-      status: loan.status, due: loan.due, overdueDays: loan.overdueDays, closedDay: loan.closedDay,
+      status: loan.status, due: loan.due, overdueDays: loan.overdueDays, closedDay: loan.closedDay, jumps: loan.jumps,
       nextVisit: p.nextVisit, want: p.want, visits: p.visits,
     };
     const jumpBefore = loan.accrued;
@@ -408,11 +412,11 @@
     let text = `${fmtDay(u.day)}の不明入金から${yen(amount)}を${c.name}（No.${loan.id}）に充当。ジャンプ(${yen(toJump)})＋元金詰め(${yen(amount - toJump)})。`;
     if (loan.status === '完済') text += 'これで完済！';
     else if (before.status === '延滞' && loan.accrued === 0) {
-      // 未払いのジャンプ金がなくなったので延滞は解消。今日を1日目として期日を数え直す
+      // 未払いのジャンプ金を満額払えたのでジャンプ成立。次回の期日は元の予定のまま（払った日から数え直さない）
       loan.status = '返済中';
       loan.overdueDays = 0;
-      loan.due = s.day + stepOf(loan.cycle);
-      text += `延滞が解消。次回の期日は${fmtDay(loan.due)}。`;
+      loan.jumps++;
+      text += `ジャンプ金が満額そろってジャンプ成立。次回の期日は元の予定どおり${fmtDay(loan.due)}。`;
     }
     log(s, 'plus', text);
   }
@@ -449,6 +453,7 @@
     loan.status = a.before.status;
     loan.due = a.before.due;
     loan.closedDay = a.before.closedDay;
+    if (a.before.jumps !== undefined) loan.jumps = a.before.jumps;
     loan.overdueDays = a.before.status === '延滞' ? a.before.overdueDays + (s.day - a.day) : a.before.overdueDays;
     if (closedByThis) {
       // この充当で完済→再来店の予定が入っていたので、それも取り消す
@@ -606,7 +611,9 @@
       log(s, 'bad', `${pick(s, LINES.fail)} 回収できなかった。`);
     } else {
       log(s, 'line', hit ? `${c.name}「${c.weakLine}」` : `${c.name}は${pick(s, LINES.success)}`);
-      let total = pay(s, loan, capOf(s, c, loan.cycle), 'collect');
+      // 取り立てに成功すると、その時かき集められるだけ払ってくる（collectFullJump なら未払いジャンプ金は満額そろえてくる）
+      const grab = capOf(s, c, loan.cycle);
+      let total = pay(s, loan, CONFIG.collectFullJump ? Math.max(grab, loan.accrued) : grab, 'collect');
       if (cmdKey === 'hoshonin' && loan.status === '延滞') {
         const g = pay(s, loan, CONFIG.guarantorPay, 'guarantor');
         if (g > 0) { total += g; log(s, 'info', `${c.guarantor}が${yen(g)}を肩代わりした。`); }
@@ -618,12 +625,15 @@
       }
       if (loan.status === '完済') {
         log(s, 'plus', `${yen(total)}を回収。${c.name}の借金はこれで完済！`);
-      } else {
-        // 回収した日を1日目として、次の期日を数え直す
+      } else if (loan.accrued === 0) {
+        // ジャンプ金が満額そろったのでジャンプ成立。次回の期日は元の予定のまま（回収した日から数え直さない）
         loan.status = '返済中';
         loan.overdueDays = 0;
-        loan.due = s.day + stepOf(loan.cycle);
-        log(s, 'plus', `${yen(total)}を回収。残りは元金${yen(loan.principal)}・未払いジャンプ金${yen(loan.accrued)}。次回の期日は${fmtDay(loan.due)}。`);
+        loan.jumps++;
+        log(s, 'plus', `${yen(total)}を回収。未払いジャンプ金が満額そろってジャンプ成立。残りの元金は${yen(loan.principal)}、次回の期日は元の予定どおり${fmtDay(loan.due)}。`);
+      } else {
+        // 満額に届かなければ、ジャンプは成立せず延滞のまま
+        log(s, 'bad', `${yen(total)}を回収。でも未払いジャンプ金があと${yen(loan.accrued)}足りず、ジャンプは成立しない。延滞のまま。`);
       }
       if (cmdKey !== 'nakiotoshi') s.sugomi = Math.min(5, s.sugomi + 1);
     }
@@ -705,20 +715,21 @@
     }
   }
 
-  // 期日前の返済（大当たりなど）。
-  //   ジャンプ金以上を持ってきた → その日にジャンプした扱い。今回分のジャンプ金を取り、残りで元金を詰め、
-  //                               今日を1日目に期日を数え直す（全部返せば完済金額＝元金＋ジャンプ金）。
-  //   ジャンプ金に満たない       → まだジャンプ金は発生していないので、全額で元金を詰める（期日はそのまま）。
-  //   延滞中                     → 未払いジャンプ金に先に充て、払い終われば今日から数え直す。
+  // 期日前・延滞中の返済（大当たりなど）。期日は元の予定の並びのまま動かさない。
+  //   期日前にジャンプ金以上を持ってきた → 次の期日の分のジャンプを先に済ませた扱い。今回分のジャンプ金を取り、
+  //                                       残りで元金を詰める（全部返せば完済金額＝元金＋ジャンプ金）。次回の期日はその次の予定日。
+  //   期日前でジャンプ金に満たない       → まだジャンプ金は発生していないので、全額で元金を詰める（期日はそのまま）。
+  //   延滞中                             → 未払いジャンプ金に先に充て、満額そろえばジャンプ成立。次回の期日は元の予定どおり。
   function earlyPay(s, loan, amount) {
     const earlyJump = loan.status === '返済中' && amount >= nextJumpOf(loan);
     if (earlyJump) accrue(s, loan, 'earlyAccrue');
     const got = pay(s, loan, amount, 'windfall');
-    if (loan.status === '返済中' && !earlyJump) return got;
-    if (loan.status !== '完済' && loan.accrued === 0) {
+    if (loan.status === '完済') return got;
+    if (earlyJump) { loan.due += stepOf(loan.cycle); loan.jumps++; }   // 次の期日の分は払い済み
+    else if (loan.status === '延滞' && loan.accrued === 0) {
       loan.status = '返済中';
       loan.overdueDays = 0;
-      loan.due = s.day + stepOf(loan.cycle);
+      loan.jumps++;
     }
     return got;
   }
