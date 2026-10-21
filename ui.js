@@ -44,6 +44,7 @@
   const txSign = (t) => G.TX[t.type].cash;
   const signed = (n) => (n < 0 ? `−${num(-n)}` : num(n));
   const signedYen = (n) => `${signed(n)}円`;
+  const lastDay = () => G.fmtDay(G.CONFIG.days);   // 最終日
   // 取引の内訳。例：ジャンプ(80,000)＋元金詰め(149,000)
   function breakdown(t, principalWord) {
     const parts = [];
@@ -580,7 +581,7 @@
         <div><dt>ジャンプ金（1回）</dt><dd>${yen(q.interest)}<small>元金 × ${esc(G.pctText(rate))}</small></dd></div>
         <div><dt>初回の期日</dt><dd>${G.fmtDay(q.due)}<small>今日を1日目として${cycle}日目</small></dd></div>
         <div><dt>ジャンプしたら次は</dt><dd>${G.fmtDay(q.nextDue)}<small>間隔は${q.step}日・利息は${cycle}日分</small></dd></div>
-        <div><dt>${G.CONFIG.days}日目までのジャンプ金</dt><dd>${yen(q.expected)}<small>ジャンプし続けて${q.dues}回</small></dd></div>
+        <div><dt>最終日${lastDay()}までのジャンプ金</dt><dd>${yen(q.expected)}<small>ジャンプし続けて${q.dues}回</small></dd></div>
         <div><dt>年利換算</dt><dd>${pct(q.apr)}<small>10日あたり${pct(q.per10)}</small></dd></div>
         <div><dt>警察の目 / 夜逃げ</dt><dd>+${q.police}<small>夜逃げ率 +${pct(q.nige)}</small></dd></div>
       </dl>
@@ -708,7 +709,7 @@
       const x = G.monthInfo(off);
       return `<button class="month ${ui.calMonth === off ? 'on' : ''}" data-act="cal-month" data-offset="${off}">${x.month}月</button>`;
     }).join('');
-    const note = ui.calMonth < 0 ? '開店前の月です' : ui.calMonth > 0 ? `${G.CONFIG.days}日目より後は、ジャンプし続けた場合の見込みです` : '日付を押すと、その日の入金予定者・貸付した債務者・入金者が一覧で出ます。15日と月末は締め日です';
+    const note = ui.calMonth < 0 ? '開店前の月です' : ui.calMonth > 0 ? `最終日${lastDay()}より後は、ジャンプし続けた場合の見込みです。15日と月末は締め日です` : '日付を押すと、その日の入金予定者・貸付した債務者・入金者が一覧で出ます。15日と月末は締め日です';
     return `
       <div class="cal-layout">
         <section class="panel">
@@ -1108,7 +1109,7 @@
     const nextRow = s.over ? '' : `<tr class="muted-row"><td>${dayLink(plan.day)}<span class="sub">${G.closingOf(plan.day)}・予定</span></td>
       <td class="num">${plan.due.length}件</td><td class="num">${plan.due.length ? yen(sum(plan.due, (l) => l.principal)) : '—'}</td><td colspan="4" class="muted">締めの日の終わりに計上</td></tr>`;
     return `<section class="panel">
-      <header class="panel-h"><h2>損益（純利）</h2><span class="sub">目標：${G.CONFIG.days}日目の締めのあとの純利 ${yen(goal)}</span></header>
+      <header class="panel-h"><h2>損益（純利）</h2><span class="sub">目標：最終日${lastDay()}の締めのあとの純利 ${yen(goal)}</span></header>
       ${plLine(p)}
       <div class="stat-row four tight">
         <div class="stat"><span>総売上（回収したジャンプ金）</span><b class="in">${yen(p.sales)}</b></div>
@@ -1203,7 +1204,7 @@
       ${dues.length ? `<ul class="plain">${dues.slice(0, 8).map(({ d, e }) =>
         `<li>${dayLink(d)} ${loanLink(e.loan)} ジャンプ金 <b>${yen(e.jump)}</b>（完済なら${yen(e.payoff)}）</li>`).join('')}</ul>
         ${dues.length > 8 ? `<p class="help">ほか${dues.length - 8}回の予定があります。全部は貸付詳細かカレンダーで確認できます。</p>` : ''}`
-        : '<p class="empty">30日目までの支払い予定はありません。</p>'}
+        : `<p class="empty">最終日${lastDay()}までの支払い予定はありません。</p>`}
       <h3 class="sec">取引履歴</h3>
       ${txs.length ? `<div class="table-wrap"><table class="data compact">
         <thead><tr><th>日付</th><th>貸付</th><th>内訳</th><th class="num">金額</th><th class="num">元金残高</th></tr></thead>
@@ -1264,7 +1265,7 @@
         ${l.closedDay ? `<dt>${l.status === '完済' ? '完済日' : '夜逃げした日'}</dt><dd>${dayLink(l.closedDay)}</dd>` : ''}
         ${l.fuwatariDay ? `<dt>不渡りに計上</dt><dd>${dayLink(l.fuwatariDay)}<small>（${G.closingOf(l.fuwatariDay)}の締め・元金${yen(l.fuwatari)}）</small></dd>` : ''}
       </dl>
-      <h3 class="sec">返済予定（${G.CONFIG.days}日目まで）</h3>
+      <h3 class="sec">返済予定（最終日${lastDay()}まで）</h3>
       ${plan.length ? `<div class="table-wrap"><table class="data compact">
         <thead><tr><th>期日</th><th class="num">ジャンプ金</th><th class="num">完済金額</th></tr></thead>
         <tbody>${plan.map(({ d, e }) => `<tr><td>${dayLink(d)}</td><td class="num">${yen(e.jump)}</td><td class="num">${yen(e.payoff)}</td></tr>`).join('')}</tbody>
@@ -1272,7 +1273,7 @@
         : `<p class="empty">${l.status === '延滞' ? `延滞中です。未払いジャンプ金 ${yen(l.accrued)} が満額そろえばジャンプ成立。次回の期日は元の予定どおり ${G.fmtDay(l.due)} です（払った日から数え直しません）。`
           : l.status === '夜逃げ' ? `夜逃げして連絡がつきません。期日（${G.fmtDay(l.lateSince)}）から2週間を過ぎた最初の締め（${G.fmtDay(G.fuwatariDayOf(s, l))}）で、元金 ${yen(l.principal)} を不渡りにして貸付総元金から引きます。`
           : l.status === '不渡り' ? `${G.fmtDay(l.fuwatariDay)}の締めで不渡りにしました。元金 ${yen(l.fuwatari)} は貸付総元金から引いてあります。`
-          : `${G.CONFIG.days}日目までの期日はありません。`}</p>`}
+          : `最終日${lastDay()}までの期日はありません。`}</p>`}
       <h3 class="sec">取引明細</h3>
       <div class="table-wrap"><table class="data compact passbook">
         <thead><tr><th>日付</th><th>内訳</th><th class="num">金額</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th class="num">元金残高</th><th class="num">未払いジャンプ金</th></tr></thead>
