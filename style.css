@@ -145,6 +145,7 @@ td .sub, .facts .sub { display: block; margin-left: 0; }
 .st-延滞 { background: var(--orange-soft); color: var(--orange); }
 .st-完済 { background: var(--green-soft); color: var(--green); }
 .st-夜逃げ { background: var(--red-soft); color: var(--red); }
+.st-不渡り { background: var(--red); color: #fff; }
 .st-来店中 { background: var(--gold-soft); color: var(--gold); }
 .st-断った, .st-まだ来ていない { background: var(--gray-soft); color: var(--muted); }
 
@@ -160,7 +161,8 @@ table.data { width: 100%; border-collapse: collapse; }
 .data.compact th, .data.compact td { padding: 6px 8px; font-size: 13px; }
 .passbook tr.tx-lend td { background: #fdf3f1; }
 .passbook tr.tx-accrue td, .passbook tr.tx-lateAccrue td, .passbook tr.tx-earlyAccrue td { color: var(--muted); }
-.passbook tr.tx-writeoff td { background: var(--red-soft); color: var(--red); }
+.passbook tr.tx-flee td { background: var(--red-soft); color: var(--red); }
+.passbook tr.tx-fuwatari td { background: var(--red-soft); color: var(--red); font-weight: 600; }
 
 /* ---- 絞り込み ---- */
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }
@@ -290,6 +292,8 @@ ul.plain li { padding: 6px 0; border-bottom: 1px dashed var(--line); }
 .chip.out { background: var(--gray-soft); color: var(--ink-2); }
 .chip.bad { background: var(--red-soft); color: var(--red); }
 .chip.unk { background: #efe4fb; color: #5b2d91; }
+.chip.close { background: #fff; color: var(--ink-2); border: 1px dashed var(--line-2); }
+.chip.close.hit { background: var(--red); color: #fff; border-color: var(--red); }
 .chip.who { display: flex; justify-content: space-between; gap: 4px; }
 .chip.who .nm { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .chip.who .amt { flex: none; font-weight: 700; }
@@ -313,6 +317,12 @@ b.unk { color: #5b2d91; }
 .day-sum b { font-size: 17px; margin-right: 6px; }
 .day-sum small { font-size: 12px; font-weight: 700; }
 .notice { border-color: #c9b2e6; background: #fcf9ff; margin-bottom: 16px; }
+.notice.danger { border-color: #e9b3ab; background: #fff8f6; }
+.breakdown.pl { margin: 0 0 16px; background: var(--panel); border: 1px solid var(--line); }
+.panel .breakdown.pl { margin: 4px 0 12px; background: var(--panel-2); border: 0; }
+.help.top { margin: 0 0 10px; }
+.kpis dd.neg { color: #ff8a7a; }
+.summary dd.in { color: var(--green); }
 
 /* ---- 詳細パネル ---- */
 .scrim { position: fixed; inset: 0; background: rgba(29, 24, 19, .35); z-index: 8; }

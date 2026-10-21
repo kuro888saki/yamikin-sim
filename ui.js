@@ -3,7 +3,7 @@
   'use strict';
   const G = window.Game;
   const $ = (sel) => document.querySelector(sel);
-  const SAVE_KEY = 'dotera-kinyu:v5';
+  const SAVE_KEY = 'dotera-kinyu:v6';
 
   let s = null;
   let mark = 0;                 // 業務日誌で「今日の分」として見せるログの開始位置
@@ -43,6 +43,7 @@
   };
   const txSign = (t) => G.TX[t.type].cash;
   const signed = (n) => (n < 0 ? `−${num(-n)}` : num(n));
+  const signedYen = (n) => `${signed(n)}円`;
   // 取引の内訳。例：ジャンプ(80,000)＋元金詰め(149,000)
   function breakdown(t, principalWord) {
     const parts = [];
@@ -51,12 +52,15 @@
     return parts.join('＋') || '—';
   }
   const collectedLine = (jump, prin) => `<p class="breakdown">回収累計 <b>${yen(jump + prin)}</b> ＝ ジャンプ金累計 <b class="in">${yen(jump)}</b> ＋ 回収済元金 <b>${yen(prin)}</b></p>`;
+  // 純利 ＝ 総売上 − 経費 − 不渡り
+  const plLine = (p) => `<p class="breakdown pl">純利 <b class="${p.net < 0 ? 'out' : 'in'}">${signedYen(p.net)}</b> ＝ 総売上 <b>${yen(p.sales)}</b> − 経費 <b>${yen(p.expenses)}</b> − 不渡り <b class="${p.fuwatari ? 'out' : ''}">${yen(p.fuwatari)}</b></p>`;
   function txSummary(t) {
     switch (t.type) {
       case 'lend': return `貸付(${num(t.amount)})`;
       case 'accrue': case 'lateAccrue': case 'earlyAccrue': return `${G.TX[t.type].label}(${num(t.amount)})`;
       case 'overdue': return `延滞（未払いジャンプ金 ${num(t.accrued)}）`;
-      case 'writeoff': return `貸倒：元金(${num(t.principal)})＋未払いジャンプ金(${num(t.accrued)})`;
+      case 'flee': return `夜逃げ・連絡不通（元金 ${num(t.principal)}・未払いジャンプ金 ${num(t.accrued)}）`;
+      case 'fuwatari': return `不渡り：元金(${num(t.amount)})を貸付総元金から引く`;
       case 'jump': case 'jumpPlus': return breakdown(t);
       case 'payoff': return `完済：${breakdown(t, '元金')}`;
       case 'partial': return `一部入金：ジャンプ(${num(t.toInterest)})のみ・ジャンプ未達`;
@@ -66,7 +70,8 @@
   }
   const txAmount = (t) => {
     const k = txSign(t);
-    if (t.type === 'overdue') return '<span class="muted">—</span>';
+    if (t.type === 'overdue' || t.type === 'flee') return '<span class="muted">—</span>';
+    if (t.type === 'fuwatari') return `<span class="bad">${num(t.amount)}</span>`;
     if (k > 0) return `<span class="in">+${num(t.amount)}</span>`;
     if (k < 0) return `<span class="out">−${num(t.amount)}</span>`;
     return `<span class="muted">${signed(t.amount)}</span>`;   // 充当・取消・ジャンプ金発生（お金は動かない）
@@ -80,7 +85,7 @@
   function loadSave() {
     try {
       const d = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
-      return d && d.s && d.s.v === 5 ? d : null;
+      return d && d.s && d.s.v === 6 ? d : null;
     } catch (e) { return null; }
   }
   function clearSave() {
@@ -282,16 +287,17 @@
 
   function renderKpis() {
     const t = G.totals(s);
-    const assets = G.totalAssets(s);
+    const p = G.pl(s);
     const goal = G.CONFIG.goal;
+    const plan = G.fuwatariPlan(s);
     const police = Math.min(100, s.police);
     $('#kpis').innerHTML = `
       <div><dt>営業日</dt><dd>${G.fmtDay(s.day)}<small>${s.day}/${G.CONFIG.days}日目</small></dd></div>
       <div><dt>手持ち資金</dt><dd>${yen(s.cash)}</dd></div>
-      <div><dt>貸付残高</dt><dd>${yen(t.balance)}<small>${t.active}件</small></dd></div>
-      <div><dt>未払いジャンプ金</dt><dd>${yen(t.accrued)}</dd></div>
-      <div class="wide"><dt>総資産 / 目標</dt><dd>${yen(assets)}<small>/ ${yen(goal)}</small></dd>
-        <div class="meter goal"><i style="width:${Math.min(100, (assets / goal) * 100)}%"></i></div></div>
+      <div><dt>貸付総元金</dt><dd>${yen(t.balance)}<small>${t.active + t.fledCount}件</small></dd></div>
+      <div><dt>次の締め</dt><dd>${G.fmtDay(plan.day)}<small>${plan.due.length ? `不渡り見込み${plan.due.length}件` : G.closingOf(plan.day)}</small></dd></div>
+      <div class="wide"><dt>純利 / 目標</dt><dd class="${p.net < 0 ? 'neg' : ''}">${signedYen(p.net)}<small>/ ${yen(goal)}</small></dd>
+        <div class="meter goal"><i style="width:${Math.max(0, Math.min(100, (p.net / goal) * 100))}%"></i></div></div>
       <div><dt>凄み</dt><dd class="sugomi" title="取り立ての成功率が上がり、夜逃げされにくくなる">${stars(s.sugomi)}</dd></div>
       <div><dt>警察の目</dt><dd>${police}<small>/ 100</small></dd>
         <div class="meter police ${police >= G.CONFIG.raidPolice ? 'hot' : ''}"><i style="width:${police}%"></i></div></div>`;
@@ -330,6 +336,7 @@
     let hint = `${G.fmtDayLong(s.day)}`;
     if (s.visitor) hint = '来店した客に、貸すか断るかを決めてください（本日の業務）';
     else if (overdue && !s.nightUsed) hint = '延滞客がいます。取り立てずに終えることもできます';
+    if (!s.visitor && !s.over && G.closingOf(s.day)) hint = `今日は${G.closingOf(s.day)}の締め日。1日を終えると、期日から2週間以上遅れて連絡がつかない客を不渡りにします`;
     $('#hint').textContent = hint;
   }
 
@@ -354,6 +361,8 @@
         <div class="stat"><span>本日期日の客</span><b>${dueToday}件</b></div>
         <div class="stat"><span>延滞中</span><b class="${overdue ? 'bad' : ''}">${overdue}件</b></div>
       </div>
+      ${plLine(G.pl(s))}
+      ${fuwatariNoticeHtml()}
       ${pendingHtml()}
       <div class="cols">
         <div class="col">
@@ -390,6 +399,36 @@
         <button class="link right" data-act="tab" data-view="loans">元金表で一覧を見る</button></header>
       ${unknownTableHtml(open)}
     </section>`;
+  }
+
+  // 不渡りの予定（夜逃げして連絡がつかない客）。締め日の当日も出す
+  function fuwatariNoticeHtml() {
+    const plan = G.fuwatariPlan(s);
+    const today = G.closingOf(s.day);
+    if (s.over || (!plan.due.length && !plan.later.length && !today)) return '';
+    const sumP = (list) => sum(list, (l) => l.principal);
+    const head = today
+      ? `今日（${G.fmtDay(s.day)}）は${today}の締め日。1日を終えると締めます`
+      : `次の締めは${G.fmtDay(plan.day)}（${G.closingOf(plan.day)}）`;
+    return `<section class="panel notice danger">
+      <header class="panel-h"><h2>不渡りの予定</h2><span class="sub">${head}</span>
+        <button class="link right" data-act="tab" data-view="loans">元金表で損益を見る</button></header>
+      ${plan.due.length || plan.later.length ? fuwatariTableHtml(plan) : '<p class="empty">連絡がつかない客はいません。今回の締めで不渡りになる貸付はありません。</p>'}
+      <p class="help">期日から2週間以上遅れて連絡がつかない（夜逃げした）客は、15日と月末の締めで不渡りにして、元金を貸付総元金から引きます。${plan.due.length ? `今回は${plan.due.length}件・元金${yen(sumP(plan.due))}が純利から引かれます。` : ''}</p>
+    </section>`;
+  }
+
+  function fuwatariTableHtml(plan) {
+    const rows = [...plan.due, ...plan.later].map((l) => {
+      const c = G.customerOf(s, l.customerId), now = plan.due.includes(l);
+      const when = G.fuwatariDayOf(s, l);
+      return `<tr><td>${custLink(c)}</td><td>${loanLink(l)}</td><td class="num"><b>${yen(l.principal)}</b></td>
+        <td>${G.fmtDay(l.lateSince)}</td><td>${dayLink(l.closedDay)}</td><td class="num">${G.lateDaysOf(s, l, plan.day)}日</td>
+        <td>${now ? `<span class="bad">${G.fmtDay(plan.day)}に不渡り</span>` : `<span class="muted">2週間未満・${G.fmtDay(when)}に計上予定</span>`}</td></tr>`;
+    }).join('');
+    return `<div class="table-wrap"><table class="data compact">
+      <thead><tr><th>顧客</th><th>貸付</th><th class="num">元金</th><th>遅れた期日</th><th>夜逃げした日</th><th class="num">締め日の遅れ</th><th>扱い</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
   }
 
   function upcomingHtml() {
@@ -541,7 +580,7 @@
         <div><dt>ジャンプ金（1回）</dt><dd>${yen(q.interest)}<small>元金 × ${esc(G.pctText(rate))}</small></dd></div>
         <div><dt>初回の期日</dt><dd>${G.fmtDay(q.due)}<small>今日を1日目として${cycle}日目</small></dd></div>
         <div><dt>ジャンプしたら次は</dt><dd>${G.fmtDay(q.nextDue)}<small>間隔は${q.step}日・利息は${cycle}日分</small></dd></div>
-        <div><dt>30日目までのジャンプ金</dt><dd>${yen(q.expected)}<small>ジャンプし続けて${q.dues}回</small></dd></div>
+        <div><dt>${G.CONFIG.days}日目までのジャンプ金</dt><dd>${yen(q.expected)}<small>ジャンプし続けて${q.dues}回</small></dd></div>
         <div><dt>年利換算</dt><dd>${pct(q.apr)}<small>10日あたり${pct(q.per10)}</small></dd></div>
         <div><dt>警察の目 / 夜逃げ</dt><dd>+${q.police}<small>夜逃げ率 +${pct(q.nige)}</small></dd></div>
       </dl>
@@ -562,7 +601,7 @@
     if (s.over) return '<p class="empty">勝負は終わりました。</p>';
     if (!overdue.length) return '<p class="empty">延滞している客はいません。今夜はゆっくり休めます。</p>';
     if (s.nightUsed) return '<p class="empty">今夜はもう動きました。続きは明日の晩です。</p>';
-    return overdue.map((loan) => {
+    return `<p class="help top">夜逃げされると連絡がつかなくなり、期日から2週間を過ぎた締め（15日・月末）で元金が不渡りになります。</p>` + overdue.map((loan) => {
       const c = G.customerOf(s, loan.customerId);
       const known = s.people[c.id].investigated;
       const cmds = Object.entries(G.COMMANDS).map(([k, cmd]) => {
@@ -595,7 +634,7 @@
     const rows = G.ledger(s);
     const counts = {};
     rows.forEach((r) => { counts[r.status] = (counts[r.status] || 0) + 1; });
-    const order = ['来店中', '返済中', '延滞', '完済', '夜逃げ', 'まだ来ていない', '断った'];
+    const order = ['来店中', '返済中', '延滞', '完済', '夜逃げ', '不渡り', 'まだ来ていない', '断った'];
     const chips = [['すべて', rows.length], ...order.filter((k) => counts[k]).map((k) => [k, counts[k]])].map(([k, n]) =>
       `<button class="filter ${ui.cust.status === k ? 'on' : ''}" data-act="filter" data-scope="cust" data-value="${k}">${k}<span>${n}</span></button>`).join('');
     const sorts = Object.entries(CUST_SORTS).map(([k, [label]]) => `<option value="${k}" ${ui.cust.sort === k ? 'selected' : ''}>${label}</option>`).join('');
@@ -621,7 +660,7 @@
     rows.sort(CUST_SORTS[ui.cust.sort][1]);
     if (!rows.length) { box.innerHTML = '<p class="empty">条件に合う顧客はいません。</p>'; return; }
     box.innerHTML = `<div class="table-wrap"><table class="data">
-      <thead><tr><th>No</th><th>氏名</th><th>職業</th><th>状態</th><th class="num">貸付残高</th><th class="num">未払いジャンプ金</th>
+      <thead><tr><th>No</th><th>氏名</th><th>職業</th><th>状態</th><th class="num">貸付総元金</th><th class="num">未払いジャンプ金</th>
         <th>次回期日</th><th>条件</th><th class="num">ジャンプ</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th>調査</th></tr></thead>
       <tbody>${rows.map((r) => {
         const live = r.loans.filter(G.isActive);
@@ -633,7 +672,7 @@
           <td>${badge(r.status)}</td>
           <td class="num">${r.balance ? yen(r.balance) : '—'}</td>
           <td class="num">${r.accrued ? yen(r.accrued) : '—'}</td>
-          <td>${r.nextDue ? G.fmtDay(r.nextDue) : r.status === '延滞' ? '<span class="bad">延滞中</span>' : '—'}</td>
+          <td>${r.nextDue ? G.fmtDay(r.nextDue) : r.status === '延滞' ? '<span class="bad">延滞中</span>' : r.status === '夜逃げ' ? '<span class="bad">連絡不通</span>' : '—'}</td>
           <td>${terms}</td>
           <td class="num">${r.jumps ? `${r.jumps}回` : '—'}</td>
           <td class="num">${r.interestPaid ? yen(r.interestPaid) : '—'}</td>
@@ -669,7 +708,7 @@
       const x = G.monthInfo(off);
       return `<button class="month ${ui.calMonth === off ? 'on' : ''}" data-act="cal-month" data-offset="${off}">${x.month}月</button>`;
     }).join('');
-    const note = ui.calMonth < 0 ? '開店前の月です' : ui.calMonth > 0 ? '30日目より後は、ジャンプし続けた場合の見込みです' : '日付を押すと、その日の入金予定者・貸付した債務者・入金者が一覧で出ます';
+    const note = ui.calMonth < 0 ? '開店前の月です' : ui.calMonth > 0 ? `${G.CONFIG.days}日目より後は、ジャンプし続けた場合の見込みです` : '日付を押すと、その日の入金予定者・貸付した債務者・入金者が一覧で出ます。15日と月末は締め日です';
     return `
       <div class="cal-layout">
         <section class="panel">
@@ -681,7 +720,7 @@
             <select id="cal-customer" class="right" aria-label="顧客で絞り込み"><option value="">すべての顧客</option>${opts}</select>
           </header>
           <p class="help cal-note">${note}</p>
-          <div class="cal-legend"><span class="chip due">入金予定（ジャンプ金）</span><span class="chip in">入金</span><span class="chip out">貸付</span><span class="chip unk">不明入金</span><span class="chip bad">延滞・夜逃げ</span></div>
+          <div class="cal-legend"><span class="chip due">入金予定（ジャンプ金）</span><span class="chip in">入金</span><span class="chip out">貸付</span><span class="chip unk">不明入金</span><span class="chip bad">延滞・夜逃げ</span><span class="chip close">締め（15日・月末）</span></div>
           <div class="cal-grid">
             ${['日', '月', '火', '水', '木', '金', '土'].map((w, i) => `<div class="cal-w ${i === 0 ? 'sun' : i === 6 ? 'sat' : ''}">${w}</div>`).join('')}
             ${cells.join('')}
@@ -738,7 +777,7 @@
       const b = dayBook(d, sched, only);
       const jumps = b.payers.filter((x) => x.t.type === 'jump' || x.t.type === 'jumpPlus').length;
       const late = b.due.filter((x) => x.bad).length;
-      const fled = s.txs.filter((t) => t.day === d && t.type === 'writeoff' && (!only || t.customerId === only)).length;
+      const fled = s.txs.filter((t) => t.day === d && t.type === 'flee' && (!only || t.customerId === only)).length;
       if (b.inSum) chips.push(`<span class="chip in">入金 ${num(b.inSum)}</span>`);
       if (jumps) chips.push(`<span class="chip in">ジャンプ ${jumps}</span>`);
       if (b.unknowns.length) chips.push(`<span class="chip unk">不明 ${num(sum(b.unknowns, (u) => u.amount))}</span>`);
@@ -753,6 +792,7 @@
       if (list.length > 3) chips.push(`<span class="chip due">ほか${list.length - 3}名</span>`);
       if (list.length > 1) total = sum(list, (e) => e.jump);   // 1人だけなら合計は同じなので出さない
     }
+    if (d >= 1 && G.closingOf(d)) chips.unshift(closingChip(d, only));
     const label = `${G.fmtDay(d)} ${chips.length ? '予定・取引あり' : ''}`;
     return `<button class="cal-cell ${state} ${d === sel ? 'sel' : ''} ${wd === 0 ? 'sun' : wd === 6 ? 'sat' : ''}" data-act="cal-day" data-day="${d}" aria-label="${esc(label)}" ${d === sel ? 'aria-pressed="true"' : ''}>
       <span class="cal-top"><span class="cal-date">${dateNum(d)}</span>${d === s.day ? '<span class="today-tag">今日</span>' : ''}</span>
@@ -760,6 +800,41 @@
       ${total ? `<span class="cal-total">計 ${yen(total)}</span>` : ''}
       <span class="cal-dots" aria-hidden="true">${chips.length ? '●'.repeat(Math.min(chips.length, 3)) : ''}</span>
     </button>`;
+  }
+
+  // 締め日のマス。済んだ締めは結果、これからの締めは不渡りの見込み
+  const plannedOn = (d, only) => s.loans.filter((l) => l.status === '夜逃げ' && G.fuwatariDayOf(s, l) === d && (!only || l.customerId === only));
+  function closingChip(d, only) {
+    const rec = s.closings.find((c) => c.day === d);
+    if (rec) {
+      const n = rec.loanIds.filter((id) => !only || G.loanOf(s, id).customerId === only).length;
+      return n ? `<span class="chip close hit">締め 不渡り${n}件</span>` : '<span class="chip close">締め 不渡りなし</span>';
+    }
+    const n = plannedOn(d, only).length;
+    return `<span class="chip close ${n ? 'hit' : ''}">締め日${n ? ` 不渡り見込み${n}` : ''}</span>`;
+  }
+
+  function closingDetailHtml(d, only) {
+    const kind = G.closingOf(d);
+    const rec = s.closings.find((c) => c.day === d);
+    const row = (l, c) => `<tr><td>${custLink(c)}</td><td>${loanLink(l)}</td><td class="num"><b>${yen(l.fuwatari || l.principal)}</b></td>
+      <td>${G.fmtDay(l.lateSince)}</td><td>${dayLink(l.closedDay)}</td><td class="num">${d - l.lateSince}日</td></tr>`;
+    const table = (list) => `<div class="table-wrap"><table class="data compact">
+      <thead><tr><th>顧客</th><th>貸付</th><th class="num">不渡り元金</th><th>遅れた期日</th><th>夜逃げした日</th><th class="num">締め日の遅れ</th></tr></thead>
+      <tbody>${list.map((l) => row(l, G.customerOf(s, l.customerId))).join('')}</tbody></table></div>`;
+    if (rec) {
+      const list = rec.loanIds.map((id) => G.loanOf(s, id)).filter((l) => !only || l.customerId === only);
+      const prev = s.closings.filter((c) => c.day < d).pop() || { sales: 0, expenses: 0, fuwatari: 0, net: 0 };
+      return `<h3 class="sec">締め（${kind}） <span class="sub">不渡り${list.length}件・元金${yen(sum(list, (l) => l.fuwatari))}を貸付総元金から引いた</span></h3>
+        ${list.length ? table(list) : '<p class="empty">この締めで不渡りになった貸付はありません。</p>'}
+        <p class="help">この締めの時点の累計：</p>${plLine(rec)}
+        <p class="help">前の締めからの増減：総売上 +${num(rec.sales - prev.sales)}／経費 +${num(rec.expenses - prev.expenses)}／不渡り +${num(rec.fuwatari - prev.fuwatari)}／純利 ${rec.net - prev.net < 0 ? '' : '+'}${signed(rec.net - prev.net)}</p>`;
+    }
+    const list = d >= s.day ? plannedOn(d, only) : [];
+    return `<h3 class="sec">締め（${kind}） <span class="sub">${d === s.day ? '今日の終わりに締めます' : 'この日の終わりに締めます'}</span></h3>
+      ${list.length ? `<p class="help">今のままだと、次の${list.length}件・元金${yen(sum(list, (l) => l.principal))}を不渡りにします。</p>${table(list)}`
+        : '<p class="empty">今のところ、この締めで不渡りになる見込みの貸付はありません。</p>'}
+      <p class="help">期日から2週間以上遅れて連絡がつかない（夜逃げした）客を不渡りにして、元金を貸付総元金から引きます。連絡がつく延滞客は不渡りにしません。</p>`;
   }
 
   function unknownStatus(u) {
@@ -843,7 +918,7 @@
         ${outSum ? `<tr><th colspan="2">返金（出金）</th><th class="num out">−${num(outSum)}円</th><th></th></tr>` : ''}</tfoot></table></div>`
       : `<p class="empty">${future ? 'まだ先の日です。' : 'この日の入金はありません。'}</p>`;
 
-    let html = `${head}${summary}
+    let html = `${head}${summary}${G.closingOf(d) ? closingDetailHtml(d, only) : ''}
       <h3 class="sec">入金予定者 <span class="sub">${b.due.length}名・ジャンプ金 計${yen(b.dueSum)}</span></h3>${dueTable}
       <h3 class="sec">貸付した債務者 <span class="sub">${b.lends.length}件・計${yen(b.lendSum)}</span></h3>${lendTable}
       <h3 class="sec">入金者 <span class="sub">${b.payers.length + b.unknowns.length}件・計${yen(b.inSum)}</span></h3>${payTable}`;
@@ -948,7 +1023,7 @@
     const t = G.totals(s);
     const counts = {};
     s.loans.forEach((l) => { counts[l.status] = (counts[l.status] || 0) + 1; });
-    const chips = [['すべて', s.loans.length], ...['返済中', '延滞', '完済', '夜逃げ'].filter((k) => counts[k]).map((k) => [k, counts[k]])].map(([k, n]) =>
+    const chips = [['すべて', s.loans.length], ...['返済中', '延滞', '完済', '夜逃げ', '不渡り'].filter((k) => counts[k]).map((k) => [k, counts[k]])].map(([k, n]) =>
       `<button class="filter ${ui.loans.status === k ? 'on' : ''}" data-act="filter" data-scope="loans" data-value="${k}">${k}<span>${n}</span></button>`).join('');
     const sorts = Object.entries(LOAN_SORTS).map(([k, [label]]) => `<option value="${k}" ${ui.loans.sort === k ? 'selected' : ''}>${label}</option>`).join('');
     let rows = s.loans.slice();
@@ -963,15 +1038,18 @@
         <td>${G.fmtDay(l.lentDay)}</td>
         <td class="num">${yen(l.lent)}</td>
         <td>${termsCell(l)}</td>
-        ${l.status === '夜逃げ'
-          ? `<td class="num muted" title="夜逃げで貸倒にした元金"><s>${yen(l.principal)}</s></td><td class="num muted"><s>${l.accrued ? yen(l.accrued) : '—'}</s></td>`
-          : `<td class="num"><b>${yen(l.principal)}</b></td><td class="num">${l.accrued ? yen(l.accrued) : '—'}</td>`}
+        ${l.status === '不渡り'
+          ? `<td class="num muted" title="締めで不渡りにして、貸付総元金から引いた元金"><s>${yen(l.principal)}</s><span class="sub">${G.fmtDay(l.fuwatariDay)}不渡り</span></td><td class="num muted"><s>${l.accrued ? yen(l.accrued) : '—'}</s></td>`
+          : l.status === '夜逃げ'
+            ? `<td class="num"><b>${yen(l.principal)}</b><span class="sub bad">不渡り未計上</span></td><td class="num muted"><s>${l.accrued ? yen(l.accrued) : '—'}</s></td>`
+            : `<td class="num"><b>${yen(l.principal)}</b></td><td class="num">${l.accrued ? yen(l.accrued) : '—'}</td>`}
         <td class="num">${G.isActive(l) ? yen(G.nextJumpOf(l)) : '—'}</td>
         <td class="num">${G.isActive(l) ? yen(G.owedOf(l) + G.nextJumpOf(l)) : '—'}</td>
         <td class="num">${l.jumps ? `${l.jumps}回` : '—'}</td>
         <td class="num">${l.interestPaid ? yen(l.interestPaid) : '—'}</td>
         <td class="num">${l.lent - l.principal ? yen(l.lent - l.principal) : '—'}</td>
-        <td>${l.status === '返済中' ? G.fmtDay(l.due) : l.status === '延滞' ? `<span class="bad">延滞${l.overdueDays}日</span>` : '—'}</td>
+        <td>${l.status === '返済中' ? G.fmtDay(l.due) : l.status === '延滞' ? `<span class="bad">延滞${l.overdueDays}日</span>`
+          : l.status === '夜逃げ' ? `<span class="bad">連絡不通・遅れ${G.lateDaysOf(s, l)}日</span><span class="sub">${G.fmtDay(G.fuwatariDayOf(s, l))}の締めで不渡り</span>` : '—'}</td>
         <td>${badge(l.status)}</td>
       </tr>`;
     }).join('') : '<tr><td colspan="14" class="empty">まだ貸付はありません。</td></tr>';
@@ -982,13 +1060,13 @@
     return `
       <div class="stat-row eight">
         <div class="stat"><span>貸付総額（累計）</span><b>${yen(t.lent)}</b></div>
-        <div class="stat"><span>元金残高</span><b>${yen(t.balance)}</b></div>
+        <div class="stat"><span>貸付総元金</span><b>${yen(t.balance)}</b><em>返済中・延滞・夜逃げ（未計上）の元金</em></div>
         <div class="stat"><span>未払いジャンプ金</span><b>${yen(t.accrued)}</b></div>
-        <div class="stat"><span>ジャンプ金累計</span><b class="in">${yen(t.interestPaid)}</b></div>
+        <div class="stat"><span>ジャンプ金累計（総売上）</span><b class="in">${yen(t.interestPaid)}</b></div>
         <div class="stat"><span>回収済元金</span><b>${yen(t.principalBack)}</b></div>
-        <div class="stat"><span>貸倒（夜逃げ）</span><b class="${t.writtenOff ? 'bad' : ''}">${yen(t.writtenOff)}</b></div>
+        <div class="stat"><span>不渡り（計上済み）</span><b class="${t.fuwatari ? 'bad' : ''}">${yen(t.fuwatari)}</b><em>${t.fuwatariCount}件</em></div>
+        <div class="stat"><span>夜逃げ（不渡り未計上）</span><b class="${t.fled ? 'bad' : ''}">${yen(t.fled)}</b><em>${t.fledCount}件・締めで不渡りに</em></div>
         <div class="stat"><span>不明入金（預かり）</span><b class="${t.unknownHeld ? 'unk' : ''}">${yen(t.unknownHeld)}</b></div>
-        <div class="stat"><span>ジャンプ回数（累計）</span><b>${t.jumps}回</b></div>
       </div>
       <section class="panel">
         <header class="panel-h"><h2>元金表</h2><span class="sub">貸付ごとの元金とジャンプ金 ・ 行をクリックすると取引明細が開きます</span></header>
@@ -1003,16 +1081,57 @@
             <th class="num">ジャンプ</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th>次回期日</th><th>状態</th></tr></thead>
           <tbody>${body}</tbody>
           ${rows.length ? `<tfoot><tr><th colspan="3">合計（${rows.length}件）</th><th class="num">${f('lent')}</th><th></th>
-            <th class="num">${fLive('principal')}</th><th class="num">${fLive('accrued')}</th>
+            <th class="num">${yen(sum(rows.filter(G.onBooks), (l) => l.principal))}</th><th class="num">${fLive('accrued')}</th>
             <th class="num">${yen(sum(live, G.nextJumpOf))}</th><th class="num">${yen(sum(live, (l) => G.owedOf(l) + G.nextJumpOf(l)))}</th>
             <th class="num">${sum(rows, (l) => l.jumps)}回</th><th class="num">${f('interestPaid')}</th><th class="num">${yen(sum(rows, (l) => l.lent - l.principal))}</th><th colspan="2"></th></tr></tfoot>` : ''}
         </table></div>
-        <p class="help">元金残高は、まだ返ってきていない元金です。次のジャンプ金は元金残高 × 利率（円未満切り捨て）。ジャンプ金より多く入金があった分は元金を詰めます。夜逃げした貸付は取り消し線で残し、合計には入れません（貸倒に計上済み）。総資産では、延滞中の元金を半分の価値として数えます。</p>
+        <p class="help">元金残高は、まだ返ってきていない元金です。次のジャンプ金は元金残高 × 利率（円未満切り捨て）。ジャンプ金より多く入金があった分は元金を詰めます。夜逃げした貸付の元金は、不渡りに計上するまで合計（貸付総元金）に残します。不渡りにした貸付は取り消し線で残し、合計には入れません。</p>
       </section>
+      ${plPanelHtml()}
       <section class="panel">
-        <header class="panel-h"><h2>不明入金（仮受金）</h2><span class="sub">誰からかわからない入金。持ち主がわかったら「充当する」で貸付に充てます。充当するまでは総資産に数えません</span></header>
+        <header class="panel-h"><h2>不明入金（仮受金）</h2><span class="sub">誰からかわからない入金。持ち主がわかったら「充当する」で貸付に充てます。充当するまでは自分のお金ではないので、純利にも数えません</span></header>
         ${unknownTableHtml(s.unknowns.slice().reverse())}
       </section>`;
+  }
+
+  // 損益（純利）：総売上 − 経費 − 不渡り。経費の内訳・締めの記録・不渡りの予定
+  function plPanelHtml() {
+    const p = G.pl(s), goal = G.CONFIG.goal;
+    const costRows = Object.entries(G.COSTS).map(([k, label]) => {
+      const list = s.costs.filter((c) => c.kind === k);
+      return `<tr><td>${label}</td><td class="num">${list.length}件</td><td class="num">${yen(sum(list, (c) => c.amount))}</td></tr>`;
+    }).join('');
+    const plan = G.fuwatariPlan(s);
+    const closeRows = s.closings.map((c) => `<tr><td>${dayLink(c.day)}<span class="sub">${c.kind}</span></td>
+      <td class="num">${c.loanIds.length ? `<span class="bad">${c.loanIds.length}件</span>` : '0件'}</td><td class="num">${c.amount ? `<span class="bad">${yen(c.amount)}</span>` : '—'}</td>
+      <td class="num">${yen(c.sales)}</td><td class="num">${yen(c.expenses)}</td><td class="num">${yen(c.fuwatari)}</td><td class="num"><b>${signedYen(c.net)}</b></td></tr>`).join('');
+    const nextRow = s.over ? '' : `<tr class="muted-row"><td>${dayLink(plan.day)}<span class="sub">${G.closingOf(plan.day)}・予定</span></td>
+      <td class="num">${plan.due.length}件</td><td class="num">${plan.due.length ? yen(sum(plan.due, (l) => l.principal)) : '—'}</td><td colspan="4" class="muted">締めの日の終わりに計上</td></tr>`;
+    return `<section class="panel">
+      <header class="panel-h"><h2>損益（純利）</h2><span class="sub">目標：${G.CONFIG.days}日目の締めのあとの純利 ${yen(goal)}</span></header>
+      ${plLine(p)}
+      <div class="stat-row four tight">
+        <div class="stat"><span>総売上（回収したジャンプ金）</span><b class="in">${yen(p.sales)}</b></div>
+        <div class="stat"><span>経費</span><b>${yen(p.expenses)}</b></div>
+        <div class="stat"><span>不渡り（締めで計上）</span><b class="${p.fuwatari ? 'bad' : ''}">${yen(p.fuwatari)}</b></div>
+        <div class="stat"><span>純利 / 目標</span><b class="${p.net < 0 ? 'bad' : ''}">${signedYen(p.net)}</b><em>目標まで ${yen(Math.max(0, goal - p.net))}</em></div>
+      </div>
+      <div class="cols">
+        <div><h3 class="sec">経費の内訳</h3>
+          <div class="table-wrap"><table class="data compact">
+            <thead><tr><th>項目</th><th class="num">件数</th><th class="num">金額</th></tr></thead>
+            <tbody>${costRows}</tbody>
+            <tfoot><tr><th>合計</th><th class="num">${s.costs.length}件</th><th class="num">${yen(p.expenses)}</th></tr></tfoot></table></div></div>
+        <div><h3 class="sec">締めの記録 <span class="sub">15日・月末</span></h3>
+          <div class="table-wrap"><table class="data compact">
+            <thead><tr><th>締め日</th><th class="num">不渡り</th><th class="num">不渡り元金</th><th class="num">総売上</th><th class="num">経費</th><th class="num">不渡り累計</th><th class="num">純利</th></tr></thead>
+            <tbody>${closeRows}${nextRow}</tbody></table></div>
+          <p class="help">総売上・経費・不渡り累計・純利は、その締めの時点の累計です。</p></div>
+      </div>
+      <h3 class="sec">不渡りの予定 <span class="sub">夜逃げして連絡がつかない客</span></h3>
+      ${plan.due.length || plan.later.length ? fuwatariTableHtml(plan) : '<p class="empty">連絡がつかない客はいません。</p>'}
+      <p class="help">総売上は回収したジャンプ金（利息）の合計で、返ってきた元金は売上に入れません。経費は身辺調査費・罰金・チラシ代。不渡りは、期日から2週間以上遅れて連絡がつかない客の元金を、15日と月末の締めで計上した額です。純利 ＝ 総売上 − 経費 − 不渡り。</p>
+    </section>`;
   }
 
   // ---- 顧客カルテ・貸付詳細（右から出る詳細パネル） ----
@@ -1046,7 +1165,7 @@
       <div class="stat-row three tight">
         <div class="stat"><span>貸付残高</span><b>${yen(r.balance)}</b></div>
         <div class="stat"><span>未払いジャンプ金</span><b>${yen(r.accrued)}</b></div>
-        <div class="stat"><span>次回期日</span><b>${r.nextDue ? dayLink(r.nextDue) : r.status === '延滞' ? '<span class="bad">延滞中</span>' : '—'}</b></div>
+        <div class="stat"><span>次回期日</span><b>${r.nextDue ? dayLink(r.nextDue) : r.status === '延滞' ? '<span class="bad">延滞中</span>' : r.status === '夜逃げ' ? '<span class="bad">連絡不通</span>' : '—'}</b></div>
         <div class="stat"><span>ジャンプ金累計</span><b class="in">${yen(r.interestPaid)}</b></div>
         <div class="stat"><span>回収済元金</span><b>${yen(r.principalBack)}</b></div>
         <div class="stat"><span>ジャンプ回数</span><b>${r.jumps}回</b></div>
@@ -1123,7 +1242,8 @@
       <div class="stat-row three tight">
         <div class="stat"><span>元金残高</span><b>${yen(l.principal)}</b></div>
         <div class="stat"><span>未払いジャンプ金</span><b>${yen(l.accrued)}</b></div>
-        ${l.status === '夜逃げ' ? `<div class="stat"><span>貸倒額</span><b class="bad">${yen(l.writtenOff)}</b></div>`
+        ${l.status === '不渡り' ? `<div class="stat"><span>不渡り額（${G.fmtDay(l.fuwatariDay)}計上）</span><b class="bad">${yen(l.fuwatari)}</b></div>`
+          : l.status === '夜逃げ' ? `<div class="stat"><span>不渡りの計上予定</span><b class="bad">${dayLink(G.fuwatariDayOf(s, l))}</b></div>`
           : G.isActive(l) ? `<div class="stat"><span>完済金額（次の期日）</span><b>${yen(G.owedOf(l) + G.nextJumpOf(l))}</b></div>`
           : `<div class="stat"><span>完済日</span><b>${l.closedDay ? dayLink(l.closedDay) : '—'}</b></div>`}
         <div class="stat"><span>ジャンプ金累計</span><b class="in">${yen(l.interestPaid)}</b></div>
@@ -1137,17 +1257,22 @@
         <dt>元金</dt><dd>${yen(l.lent)}</dd>
         <dt>条件</dt><dd>${esc(termsText(l.rate, l.cycle))}</dd>
         <dt>期日の数え方</dt><dd>当日から換算<small>（期日の間隔は${G.stepOf(l.cycle)}日）</small></dd>
-        <dt>次のジャンプ金</dt><dd>${yen(G.nextJumpOf(l))}<small>（元金残高 ${yen(l.principal)} × ${esc(G.pctText(l.rate))}）</small></dd>
+        <dt>次のジャンプ金</dt><dd>${G.isActive(l) ? `${yen(G.nextJumpOf(l))}<small>（元金残高 ${yen(l.principal)} × ${esc(G.pctText(l.rate))}）</small>` : '—'}</dd>
         <dt>年利換算</dt><dd>${pct(G.aprOf(l.rate, l.cycle))}<small>10日あたり${pct(G.per10(l.rate, l.cycle))}</small></dd>
-        <dt>次回期日</dt><dd>${l.status === '返済中' ? dayLink(l.due) : l.status === '延滞' ? `<span class="bad">延滞${l.overdueDays}日</span>` : '—'}</dd>
+        <dt>次回期日</dt><dd>${l.status === '返済中' ? dayLink(l.due) : l.status === '延滞' ? `<span class="bad">延滞${l.overdueDays}日</span>`
+          : l.status === '夜逃げ' ? `<span class="bad">連絡不通</span><small>（${G.fmtDay(l.lateSince)}の期日から${G.lateDaysOf(s, l)}日遅れ）</small>` : '—'}</dd>
         ${l.closedDay ? `<dt>${l.status === '完済' ? '完済日' : '夜逃げした日'}</dt><dd>${dayLink(l.closedDay)}</dd>` : ''}
+        ${l.fuwatariDay ? `<dt>不渡りに計上</dt><dd>${dayLink(l.fuwatariDay)}<small>（${G.closingOf(l.fuwatariDay)}の締め・元金${yen(l.fuwatari)}）</small></dd>` : ''}
       </dl>
-      <h3 class="sec">返済予定（30日目まで）</h3>
+      <h3 class="sec">返済予定（${G.CONFIG.days}日目まで）</h3>
       ${plan.length ? `<div class="table-wrap"><table class="data compact">
         <thead><tr><th>期日</th><th class="num">ジャンプ金</th><th class="num">完済金額</th></tr></thead>
         <tbody>${plan.map(({ d, e }) => `<tr><td>${dayLink(d)}</td><td class="num">${yen(e.jump)}</td><td class="num">${yen(e.payoff)}</td></tr>`).join('')}</tbody>
       </table></div><p class="help">2回目以降は、ジャンプ金だけ入れ続けた場合の見込みです。元金を詰めれば、その分ジャンプ金も下がります。</p>`
-        : `<p class="empty">${l.status === '延滞' ? `延滞中です。未払いジャンプ金 ${yen(l.accrued)} が満額そろえばジャンプ成立。次回の期日は元の予定どおり ${G.fmtDay(l.due)} です（払った日から数え直しません）。` : '30日目までの期日はありません。'}</p>`}
+        : `<p class="empty">${l.status === '延滞' ? `延滞中です。未払いジャンプ金 ${yen(l.accrued)} が満額そろえばジャンプ成立。次回の期日は元の予定どおり ${G.fmtDay(l.due)} です（払った日から数え直しません）。`
+          : l.status === '夜逃げ' ? `夜逃げして連絡がつきません。期日（${G.fmtDay(l.lateSince)}）から2週間を過ぎた最初の締め（${G.fmtDay(G.fuwatariDayOf(s, l))}）で、元金 ${yen(l.principal)} を不渡りにして貸付総元金から引きます。`
+          : l.status === '不渡り' ? `${G.fmtDay(l.fuwatariDay)}の締めで不渡りにしました。元金 ${yen(l.fuwatari)} は貸付総元金から引いてあります。`
+          : `${G.CONFIG.days}日目までの期日はありません。`}</p>`}
       <h3 class="sec">取引明細</h3>
       <div class="table-wrap"><table class="data compact passbook">
         <thead><tr><th>日付</th><th>内訳</th><th class="num">金額</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th class="num">元金残高</th><th class="num">未払いジャンプ金</th></tr></thead>
@@ -1160,25 +1285,29 @@
 
   function renderResult() {
     if (!s.over) { $('#result').hidden = true; return; }
-    const t = G.totals(s);
+    const t = G.totals(s), p = G.pl(s);
     const book = G.ledger(s);
     const count = (st) => s.loans.filter((l) => l.status === st).length;
-    const rows = book.map(({ c, status, lent, interestPaid, principalBack }) => `<tr>
+    const carry = sum(s.loans.filter((l) => l.status === '延滞' || l.status === '夜逃げ'), (l) => l.principal);
+    const rows = book.map(({ c, status, lent, interestPaid, principalBack, fuwatari }) => `<tr>
       <td>${esc(c.name)}</td><td>${badge(status)}</td>
-      <td class="num">${lent ? yen(lent) : '—'}</td><td class="num in">${interestPaid ? yen(interestPaid) : '—'}</td><td class="num">${principalBack ? yen(principalBack) : '—'}</td></tr>`).join('');
+      <td class="num">${lent ? yen(lent) : '—'}</td><td class="num in">${interestPaid ? yen(interestPaid) : '—'}</td><td class="num">${principalBack ? yen(principalBack) : '—'}</td>
+      <td class="num ${fuwatari ? 'bad' : ''}">${fuwatari ? yen(fuwatari) : '—'}</td></tr>`).join('');
     $('#result-body').innerHTML = `
       <span class="big-stamp ${s.over.win ? 'win' : 'lose'}">${s.over.win ? '勝ち' : '負け'}</span>
       <h2>${esc(s.over.reason)}</h2>
       <dl class="summary">
-        <div><dt>総資産</dt><dd>${yen(G.totalAssets(s))}</dd></div>
-        <div><dt>ジャンプ金累計</dt><dd>${yen(t.interestPaid)}</dd></div>
-        <div><dt>回収済元金</dt><dd>${yen(t.principalBack)}</dd></div>
-        <div><dt>貸倒</dt><dd>${yen(t.writtenOff)}</dd></div>
-        <div><dt>元金残高</dt><dd>${yen(t.balance)}</dd></div>
-        <div><dt>完済 / 夜逃げ</dt><dd>${count('完済')} / ${count('夜逃げ')}</dd></div>
+        <div><dt>純利</dt><dd class="${p.net < 0 ? 'bad' : 'in'}">${signedYen(p.net)}</dd></div>
+        <div><dt>総売上</dt><dd>${yen(p.sales)}</dd></div>
+        <div><dt>経費</dt><dd>${yen(p.expenses)}</dd></div>
+        <div><dt>不渡り</dt><dd>${yen(p.fuwatari)}</dd></div>
+        <div><dt>貸付総元金（持ち越し）</dt><dd>${yen(t.balance)}</dd></div>
+        <div><dt>完済 / 夜逃げ / 不渡り</dt><dd>${count('完済')} / ${count('夜逃げ')} / ${count('不渡り')}</dd></div>
       </dl>
+      ${plLine(p)}
+      ${carry ? `<p class="help">延滞・夜逃げのまま持ち越した元金 ${yen(carry)} は、まだ不渡りにしていないので純利から引いていません。</p>` : ''}
       <div class="table-wrap"><table class="data compact">
-        <thead><tr><th>客</th><th>最後の状態</th><th class="num">貸した総額</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th></tr></thead>
+        <thead><tr><th>客</th><th>最後の状態</th><th class="num">貸した総額</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th class="num">不渡り</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
       <p class="actions" style="margin-top:16px">
         <button class="primary" data-act="restart">もう一度（別の展開）</button>

@@ -9,4 +9,12 @@ if lsof -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 (sleep 1; open "http://127.0.0.1:$PORT/") &
 echo "どてらい金融を起動しました。遊び終わったらこのウィンドウを閉じてください。"
-python3 -m http.server $PORT --bind 127.0.0.1
+# ブラウザに古いファイルを覚えさせない（更新したあとも必ず新しい中身で動くように）
+python3 - "$PORT" <<'PY'
+import http.server, sys
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-store')
+        super().end_headers()
+http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), Handler).serve_forever()
+PY

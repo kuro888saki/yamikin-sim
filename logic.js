@@ -18,7 +18,13 @@
 //
 // 不明入金
 //   誰からかわからない入金。仮受金として預かり、持ち主がわかったら手動で貸付に充当する。
-//   充当するまでは自分のお金ではないので、総資産には数えない。
+//   充当するまでは自分のお金ではないので、純利にも貸付総元金にも数えない。
+//
+// 不渡りと純利
+//   夜逃げした客は連絡がつかない（連絡不通）。期日から2週間以上遅れていて連絡がつかない客は不渡りにする。
+//   不渡りを引くのは毎月15日と月末の締め。そこで不渡りになった元金を貸付総元金から引く。
+//   それまでは夜逃げした客の元金も貸付総元金に残る（未計上）。
+//   純利 = 総売上（回収したジャンプ金）− 経費（身辺調査・罰金・チラシ代）− 不渡り（元金）。目指すのは純利。
 (function (root) {
   'use strict';
 
@@ -27,7 +33,7 @@
     days: 30,
     startDate: '2026-11-01',  // 1日目の日付（11月は30日あるので1か月ちょうど）
     startCash: 1000000,
-    goal: 1500000,            // 30日目の総資産がこれ以上なら勝ち
+    goal: 500000,             // 30日目の締めのあとの純利がこれ以上なら勝ち
     minCycle: 1,              // S の範囲
     maxCycle: 30,
     minRate: 10,              // 1Sあたりの利率（千分率。10 = 1%、1000 = 100%）
@@ -52,7 +58,7 @@
     nigePerFoot: 0.04,        // 夜逃げ率 = 逃げ足×0.04 + 延滞日数×0.03 + 金利の上乗せ − 凄み×0.02
     nigePerDay: 0.03,
     nigePerSugomi: 0.02,
-    overdueValue: 0.5,        // 総資産に数えるときの延滞分の価値
+    fuwatariDays: 14,         // 期日からこの日数以上遅れて連絡がつかない客を、締めで不渡りにする
     raidPolice: 50,           // 警察の手入れが起きはじめる警察の目
     raidChance: 0.25,
     fine: 150000,
@@ -115,7 +121,15 @@
     allocate: { label: '不明入金の充当', cash: 0, pay: true },   // お金は不明入金のときに受け取り済み
     allocCancel: { label: '充当の取消', cash: 0, pay: true },     // 金額はマイナスで記録する
     overdue: { label: '延滞発生', cash: 0 },
-    writeoff: { label: '貸倒（夜逃げ）', cash: 0 },
+    flee: { label: '夜逃げ（連絡不通）', cash: 0 },
+    fuwatari: { label: '不渡り', cash: 0 },                     // 締めで元金を貸付総元金から引いた記録
+  };
+
+  // 経費の種類
+  const COSTS = {
+    investigate: '身辺調査費',
+    fine: '罰金',
+    rival: 'チラシ代（ライバル対策）',
   };
 
   class GameError extends Error {}
@@ -161,6 +175,18 @@
   function fmtDayLong(day) {
     const t = dateOf(day);
     return `${t.getUTCFullYear()}年${t.getUTCMonth() + 1}月${t.getUTCDate()}日（${WEEK[t.getUTCDay()]}）`;
+  }
+
+  // 締め日（毎月15日と月末）。この日の終わりに不渡りを計上する
+  function closingOf(day) {
+    const t = dateOf(day), next = dateOf(day + 1);
+    if (next.getUTCDate() === 1) return '月末';
+    return t.getUTCDate() === 15 ? '15日' : null;
+  }
+  function nextClosingDay(day) {
+    let d = day;
+    while (!closingOf(d)) d++;
+    return d;
   }
 
   // ---- 貸付条件 ----
@@ -239,7 +265,8 @@
 
   function newGame(customers, seed) {
     const s = {
-      v: 5, day: 0, cash: CONFIG.startCash, sugomi: 1, police: 0, seed: seed >>> 0, unknowns: [], nextUnknownId: 1,
+      v: 6, day: 0, cash: CONFIG.startCash, sugomi: 1, police: 0, seed: seed >>> 0, unknowns: [], nextUnknownId: 1,
+      costs: [], closings: [],
       customers, people: {}, loans: [], txs: [], visitor: null, nightUsed: false, log: [], over: null,
       nextLoanId: 1, nextTxId: 1,
     };
@@ -262,6 +289,10 @@
   const loanOf = (s, id) => s.loans.find((l) => l.id === id);
   const visitorOf = (s) => (s.visitor ? customerOf(s, s.visitor) : null);
   const isActive = (loan) => loan.status === '返済中' || loan.status === '延滞';
+  const onBooks = (loan) => isActive(loan) || loan.status === '夜逃げ';   // 貸付総元金に入っている貸付（夜逃げは不渡りの計上まで残る）
+  const lateDaysOf = (s, loan, day) => (loan.lateSince == null ? 0 : (day || s.day) - loan.lateSince); // 期日から何日遅れているか
+  // 夜逃げした貸付を不渡りに計上する締め日（期日から2週間を過ぎた最初の締め）
+  const fuwatariDayOf = (s, loan) => nextClosingDay(Math.max(s.day, loan.lateSince + CONFIG.fuwatariDays));
   const hasGuarantor = (s, c) => c.guarantor !== 'なし' && !s.people[c.id].guarantorGone;
   const log = (s, kind, text) => s.log.push({ day: s.day, kind, text });
   const owedOf = (loan) => loan.principal + loan.accrued;
@@ -276,6 +307,13 @@
   function capRange(c, cycle, real) {
     const base = (real ? c.income : c.declaredIncome) * CONFIG.capRatio * (cycle / 10);
     return [floorTo(base * 0.8, CONFIG.payUnit), floorTo(base * 1.2, CONFIG.payUnit)];
+  }
+
+  function spend(s, kind, amount) {
+    if (amount <= 0) return 0;
+    s.cash -= amount;
+    s.costs.push({ day: s.day, kind, amount });
+    return amount;
   }
 
   function tx(s, loan, type, amount, parts) {
@@ -400,7 +438,7 @@
     const c = customerOf(s, loan.customerId), p = s.people[c.id];
     // 取り消しのときに戻せるよう、充当前の状態を控えておく
     const before = {
-      status: loan.status, due: loan.due, overdueDays: loan.overdueDays, closedDay: loan.closedDay, jumps: loan.jumps,
+      status: loan.status, due: loan.due, overdueDays: loan.overdueDays, lateSince: loan.lateSince, closedDay: loan.closedDay, jumps: loan.jumps,
       nextVisit: p.nextVisit, want: p.want, visits: p.visits,
     };
     const jumpBefore = loan.accrued;
@@ -415,6 +453,7 @@
       // 未払いのジャンプ金を満額払えたのでジャンプ成立。次回の期日は元の予定のまま（払った日から数え直さない）
       loan.status = '返済中';
       loan.overdueDays = 0;
+      loan.lateSince = null;
       loan.jumps++;
       text += `ジャンプ金が満額そろってジャンプ成立。次回の期日は元の予定どおり${fmtDay(loan.due)}。`;
     }
@@ -430,7 +469,7 @@
     const loan = loanOf(s, a.loanId);
     const last = s.txs.filter((t) => t.loanId === loan.id).pop();
     if (!last || last.id !== a.txId) return { ok: false, reason: 'この充当のあとに同じ貸付の取引があるため、取り消せません' };
-    if (loan.status === '夜逃げ') return { ok: false, reason: '夜逃げした貸付の充当は取り消せません' };
+    if (loan.status === '夜逃げ' || loan.status === '不渡り') return { ok: false, reason: `${loan.status}になった貸付の充当は取り消せません` };
     if (loan.status === '完済') {
       const p = s.people[loan.customerId];
       if (p.visits > a.before.visits || s.visitor === loan.customerId) return { ok: false, reason: '完済後にもう再来店しているため、取り消せません' };
@@ -453,7 +492,8 @@
     loan.status = a.before.status;
     loan.due = a.before.due;
     loan.closedDay = a.before.closedDay;
-    if (a.before.jumps !== undefined) loan.jumps = a.before.jumps;
+    loan.jumps = a.before.jumps;
+    loan.lateSince = a.before.lateSince;
     loan.overdueDays = a.before.status === '延滞' ? a.before.overdueDays + (s.day - a.day) : a.before.overdueDays;
     if (closedByThis) {
       // この充当で完済→再来店の予定が入っていたので、それも取り消す
@@ -517,6 +557,7 @@
       if (paid > 0) pay(s, loan, paid, 'due');
       loan.status = '延滞';
       loan.overdueDays = 0;
+      loan.lateSince = s.day;           // 遅れはじめた期日（不渡りの判定に使う）
       loan.due += stepOf(loan.cycle);   // 延滞中に次のジャンプ金が発生する日
       tx(s, loan, 'overdue', 0);
       log(s, 'bad', paid > 0
@@ -533,7 +574,7 @@
     const p = s.people[c.id];
     if (p.investigated) throw new GameError('もう調べてあります');
     if (s.cash < CONFIG.investigateCost) throw new GameError('調査費が足りません');
-    s.cash -= CONFIG.investigateCost;
+    spend(s, 'investigate', CONFIG.investigateCost);
     p.investigated = true;
     log(s, 'info', `身辺調査に${yen(CONFIG.investigateCost)}。${c.name}の本当の借金理由は「${c.realReason}」だった。`);
   }
@@ -568,8 +609,8 @@
     s.police += policeOf(rate, cycle);
     const loan = {
       id: s.nextLoanId++, customerId: c.id, lent: amount, principal: amount, accrued: 0, rate, cycle,
-      lentDay: s.day, due: s.day + stepOf(cycle), status: '返済中', overdueDays: 0, jumps: 0,
-      collected: 0, interestPaid: 0, writtenOff: 0, closedDay: null,
+      lentDay: s.day, due: s.day + stepOf(cycle), status: '返済中', overdueDays: 0, lateSince: null, jumps: 0,
+      collected: 0, interestPaid: 0, closedDay: null, fuwatari: 0, fuwatariDay: null,
     };
     s.loans.push(loan);
     tx(s, loan, 'lend', amount);
@@ -629,6 +670,7 @@
         // ジャンプ金が満額そろったのでジャンプ成立。次回の期日は元の予定のまま（回収した日から数え直さない）
         loan.status = '返済中';
         loan.overdueDays = 0;
+        loan.lateSince = null;
         loan.jumps++;
         log(s, 'plus', `${yen(total)}を回収。未払いジャンプ金が満額そろってジャンプ成立。残りの元金は${yen(loan.principal)}、次回の期日は元の予定どおり${fmtDay(loan.due)}。`);
       } else {
@@ -664,33 +706,57 @@
       const c = customerOf(s, loan.customerId);
       loan.overdueDays++;
       if (rand(s) < nigeChance(s, loan)) {
-        loan.writtenOff = owedOf(loan);
-        tx(s, loan, 'writeoff', loan.writtenOff);
+        // 夜逃げした客には連絡がつかない。元金は不渡りに計上するまで貸付総元金に残る
+        tx(s, loan, 'flee', 0);
         close(s, loan, '夜逃げ');
-        log(s, 'bad', `${c.name}が夜逃げした。部屋には「${c.kuchiguse}」と書かれた置き手紙だけ。${yen(loan.writtenOff)}が焦げついた。`);
+        log(s, 'bad', `${c.name}が夜逃げした。部屋には「${c.kuchiguse}」と書かれた置き手紙だけ。電話もつながらない。元金${yen(loan.principal)}は${fmtDay(fuwatariDayOf(s, loan))}の締めで不渡りに計上する。`);
       }
     }
 
     townEvent(s);
     s.police = Math.max(0, s.police - CONFIG.policeDecay);
+    if (closingOf(s.day)) closeBooks(s);
 
     const active = s.loans.some(isActive);
     if (s.cash < CONFIG.minLend && !active) s.over = { win: false, reason: '貸す金も、取り立てる相手もいない。どてらい金融、倒産。' };
     else if (s.police >= 100) s.over = { win: false, reason: '警察の目が限界を超えた。ガサ入れで店じまい。' };
     else if (s.day >= CONFIG.days) {
-      const a = totalAssets(s);
-      s.over = a >= CONFIG.goal
-        ? { win: true, reason: `30日で総資産${yen(a)}。目標の${yen(CONFIG.goal)}を超えた！` }
-        : { win: false, reason: `30日で総資産${yen(a)}。目標の${yen(CONFIG.goal)}に届かなかった。` };
+      const net = pl(s).net;
+      s.over = net >= CONFIG.goal
+        ? { win: true, reason: `${CONFIG.days}日で純利${yen(net)}。目標の${yen(CONFIG.goal)}を超えた！` }
+        : { win: false, reason: `${CONFIG.days}日で純利${yen(net)}。目標の${yen(CONFIG.goal)}に届かなかった。` };
     }
     if (s.over) log(s, s.over.win ? 'plus' : 'bad', s.over.reason);
     else startDay(s);
   }
 
+  // 締め（15日・月末）。期日から2週間以上遅れて連絡がつかない（夜逃げした）客を不渡りにし、元金を貸付総元金から引く
+  function closeBooks(s) {
+    const booked = [];
+    for (const loan of s.loans) {
+      if (loan.status !== '夜逃げ' || lateDaysOf(s, loan) < CONFIG.fuwatariDays) continue;
+      loan.status = '不渡り';
+      loan.fuwatari = loan.principal;
+      loan.fuwatariDay = s.day;
+      tx(s, loan, 'fuwatari', loan.fuwatari);
+      booked.push(loan.id);
+    }
+    const p = pl(s);
+    const amount = booked.reduce((a, id) => a + loanOf(s, id).fuwatari, 0);
+    const waiting = s.loans.filter((l) => l.status === '夜逃げ');
+    s.closings.push({ day: s.day, kind: closingOf(s.day), loanIds: booked, amount, sales: p.sales, expenses: p.expenses, fuwatari: p.fuwatari, net: p.net });
+    let text = `【${fmtDay(s.day)}・${closingOf(s.day)}の締め】`;
+    text += booked.length
+      ? `不渡り${booked.length}件（${booked.map((id) => customerOf(s, loanOf(s, id).customerId).name).join('・')}）、元金${yen(amount)}を貸付総元金から引いた。`
+      : '不渡りはなし。';
+    if (waiting.length) text += `夜逃げしてまだ2週間たっていない${waiting.length}件（元金${yen(waiting.reduce((a, l) => a + l.principal, 0))}）は次の締めに持ち越し。`;
+    text += `ここまでの純利${yen(p.net)}（総売上${yen(p.sales)} − 経費${yen(p.expenses)} − 不渡り${yen(p.fuwatari)}）。`;
+    log(s, booked.length ? 'bad' : 'info', text);
+  }
+
   function townEvent(s) {
     if (s.police >= CONFIG.raidPolice && rand(s) < CONFIG.raidChance) {
-      const fine = Math.min(CONFIG.fine, s.cash);
-      s.cash -= fine;
+      const fine = spend(s, 'fine', Math.min(CONFIG.fine, s.cash));
       s.police = Math.max(0, s.police - 30);
       log(s, 'bad', `警察の手入れ。帳簿を突っつかれて罰金${yen(fine)}。`);
       return;
@@ -698,8 +764,7 @@
     const r = rand(s);
     const active = s.loans.filter(isActive);
     if (r < 0.05) {
-      const cost = Math.min(CONFIG.rivalCost, s.cash);
-      s.cash -= cost;
+      const cost = spend(s, 'rival', Math.min(CONFIG.rivalCost, s.cash));
       log(s, 'bad', `向かいにライバルの「にこにこローン」が開店。チラシ合戦で${yen(cost)}かかった。`);
     } else if (r < 0.1 && active.length) {
       const loan = pick(s, active);
@@ -729,6 +794,7 @@
     else if (loan.status === '延滞' && loan.accrued === 0) {
       loan.status = '返済中';
       loan.overdueDays = 0;
+      loan.lateSince = null;
       loan.jumps++;
     }
     return got;
@@ -736,19 +802,28 @@
 
   // ---- 集計（台帳・カレンダー・元金表で使う） ----
 
-  // 貸付は元金だけを数える（未払いジャンプ金は回収するまで資産に数えない）
-  function totalAssets(s) {
-    let a = s.cash;
-    for (const l of s.loans) {
-      if (l.status === '返済中') a += l.principal;
-      if (l.status === '延滞') a += l.principal * CONFIG.overdueValue;
+  // 損益。純利 = 総売上（回収したジャンプ金）− 経費 − 不渡り（締めで計上した元金）
+  function pl(s) {
+    const sales = s.loans.reduce((a, l) => a + l.interestPaid, 0);
+    const expenses = s.costs.reduce((a, c) => a + c.amount, 0);
+    const fuwatari = s.loans.reduce((a, l) => a + l.fuwatari, 0);
+    const byKind = {};
+    for (const c of s.costs) byKind[c.kind] = (byKind[c.kind] || 0) + c.amount;
+    return { sales, expenses, fuwatari, net: sales - expenses - fuwatari, byKind };
+  }
+
+  // 次の締めで不渡りになる見込みの貸付（夜逃げして、締めの日に期日から2週間以上たっているもの）
+  function fuwatariPlan(s) {
+    const day = nextClosingDay(s.closings.some((c) => c.day === s.day) ? s.day + 1 : s.day);   // 今日の締めが済んでいたら次の締め
+    const due = [], later = [];
+    for (const l of s.loans.filter((x) => x.status === '夜逃げ')) {
+      (lateDaysOf(s, l, day) >= CONFIG.fuwatariDays ? due : later).push(l);
     }
-    for (const u of s.unknowns) a -= unknownLeft(u);   // 不明入金は預かり金
-    return Math.round(a);
+    return { day, due, later };
   }
 
   function totals(s) {
-    const t = { lent: 0, balance: 0, accrued: 0, interestPaid: 0, principalBack: 0, collected: 0, writtenOff: 0, active: 0, overdue: 0, jumps: 0, unknownHeld: 0, unknownOpen: 0 };
+    const t = { lent: 0, balance: 0, accrued: 0, interestPaid: 0, principalBack: 0, collected: 0, active: 0, overdue: 0, jumps: 0, unknownHeld: 0, unknownOpen: 0, fled: 0, fledCount: 0, fuwatari: 0, fuwatariCount: 0 };
     for (const u of s.unknowns) {
       t.unknownHeld += unknownLeft(u);
       if (unknownLeft(u) > 0) t.unknownOpen++;
@@ -757,11 +832,13 @@
       t.lent += l.lent;
       t.interestPaid += l.interestPaid;
       t.collected += l.collected;
-      t.writtenOff += l.writtenOff;
       t.jumps += l.jumps;
       t.principalBack += l.lent - l.principal;   // 回収累計 = ジャンプ金累計 + 回収済元金
-      if (isActive(l)) { t.balance += l.principal; t.accrued += l.accrued; t.active++; }
+      if (onBooks(l)) t.balance += l.principal;   // 貸付総元金（夜逃げも不渡りに計上するまで入る）
+      if (isActive(l)) { t.accrued += l.accrued; t.active++; }
       if (l.status === '延滞') t.overdue++;
+      if (l.status === '夜逃げ') { t.fled += l.principal; t.fledCount++; }
+      if (l.status === '不渡り') { t.fuwatari += l.fuwatari; t.fuwatariCount++; }
     }
     return t;
   }
@@ -799,7 +876,8 @@
       const dues = active.filter((l) => l.status === '返済中').map((l) => l.due);
       return {
         c, p, loans, loan, status,
-        balance: active.reduce((a, l) => a + l.principal, 0),
+        balance: loans.filter(onBooks).reduce((a, l) => a + l.principal, 0),
+        fuwatari: loans.reduce((a, l) => a + l.fuwatari, 0),
         accrued: active.reduce((a, l) => a + l.accrued, 0),
         nextDue: dues.length ? Math.min(...dues) : null,
         collected: loans.reduce((a, l) => a + l.collected, 0),
@@ -814,7 +892,8 @@
   const api = {
     CONFIG, PRESETS, COMMANDS, TX, GameError, parseCSV, loadCustomers, newGame,
     investigate, lend, lendLimit, quote, refuse, collect, setMemo, endDay,
-    totalAssets, totals, schedule, ledger, nigeChance, capRange, owedOf, nextJumpOf, isActive,
+    COSTS, pl, fuwatariPlan, closingOf, nextClosingDay, lateDaysOf, fuwatariDayOf, onBooks,
+    totals, schedule, ledger, nigeChance, capRange, owedOf, nextJumpOf, isActive,
     visitorOf, customerOf, loanOf, hasGuarantor,
     fmtDay, fmtDayLong, weekdayOf, termsLabel, termsDesc, pctText, per10, aprOf, policeOf, rateNige,
     stepOf, interestOf, yen, monthInfo, horizonDay, allocateUnknown, unknownOf, unknownLeft,
