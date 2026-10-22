@@ -24,7 +24,15 @@
 //   夜逃げした客は連絡がつかない（連絡不通）。期日から2週間以上遅れていて連絡がつかない客は不渡りにする。
 //   不渡りを引くのは毎月15日と月末の締め。そこで不渡りになった元金を貸付総元金から引く。
 //   それまでは夜逃げした客の元金も貸付総元金に残る（未計上）。
-//   純利 = 総売上（回収したジャンプ金＋振込手数料）− 経費（身辺調査・罰金・チラシ代）− 不渡り（元金）。目指すのは純利。
+//   純利 = 総売上（回収したジャンプ金＋振込手数料＋延滞金＋雑収入＋口座の転売益）− 経費（身辺調査・罰金・チラシ代）− 不渡り（元金）。
+//
+// 延滞金
+//   延滞すると1日につき10,000円の延滞金が付く。入金は 延滞金 → ジャンプ金 → 元金 の順に充て、
+//   延滞金と未払いジャンプ金が両方そろって初めてジャンプ成立。払われた延滞金は売上。
+//
+// 口座の買取・転売
+//   延滞金を払えそうにない延滞客から銀行口座を1通買い取り（代金は現金で渡すか、返済に充てる）、ほかの業者に転売する。
+//   転売額と買取額の差が売上。転売すると警察の目が上がる。
 //
 // 受付表記（貸付条件）
 //   ①元金-完済金（万円）②S ③初回の期日 ④振込金額 ⑤振込先口座 の5点で決める。
@@ -79,6 +87,10 @@
     nigePerDay: 0.03,
     nigePerSugomi: 0.02,
     fuwatariDays: 14,         // 期日からこの日数以上遅れて連絡がつかない客を、締めで不渡りにする
+    lateFeePerDay: 10000,     // 延滞金：延滞1日につき（期日の夜から毎晩付く。3日遅れなら30,000円）
+    accountBuyPrice: 25000,   // 延滞客から銀行口座を1通買い取る値段（初期値）
+    accountSellPrice: 80000,  // それをほかの業者に転売する値段（初期値）
+    accountPolice: 15,        // 口座を転売したときに上がる警察の目
     raidPolice: 50,           // 警察の手入れが起きはじめる警察の目
     raidChance: 0.25,
     fine: 150000,
@@ -117,7 +129,7 @@
   const MAN = ['income', 'want', 'hiddenAmount', 'declaredIncome'];   // 万円 → 円に直す列
   // 顧客カルテで足した項目の列。書き出したCSVに入り、読み込むときはあれば読む（なければ空欄）
   const EXTRA_COLUMNS = {
-    declaredIncome: '月収・申告(万円)', address: '現住所', homeAddress: '実家の住所', homeContact: '実家の連絡先',
+    declaredIncome: '月収・申告(万円)', address: '現住所', homePhone: '自宅の電話番号', mobilePhone: '携帯の電話番号', homeAddress: '実家の住所', homeContact: '実家の連絡先',
     workName: '勤務先名', workPhone: '勤務先の電話番号', workAddress: '勤務先の所在地', workHours: '勤務時間', workHoliday: '休日', payday: '給料日',
     guarantorRelation: '保証人の関係', guarantorContact: '保証人の連絡先',
     source: '流入元', referrer: '紹介者名', sourceNote: '流入元の補足', memo: 'メモ',
@@ -149,6 +161,7 @@
     allocate: { label: '不明入金の充当', cash: 0, pay: true },   // お金は不明入金のときに受け取り済み
     allocCancel: { label: '充当の取消', cash: 0, pay: true },     // 金額はマイナスで記録する
     manual: { label: '入金（手入力）', cash: 1, pay: true },     // 入金台帳から手で記録した入金
+    offset: { label: '口座買取の相殺', cash: 0, pay: true },      // 口座の買取代金を返済に充てた分（お金は動かない）
     adjust: { label: '修正', cash: 0 },                          // 元金残高・未払いジャンプ金を手で直した記録（dPrincipal・dAccrued）
     overdue: { label: '延滞発生', cash: 0 },
     flee: { label: '夜逃げ（連絡不通）', cash: 0 },
@@ -392,7 +405,8 @@
   // 表の情報（申告・連絡先など）。kind: text（文字）/ yen（円）/ int（整数）/ select
   const PROFILE = {
     name: txt('氏名', 30, true), kana: txt('ふりがな', 40), age: num('年齢', 'int', 18, 120), job: txt('職業', 40),
-    address: txt('現住所', 120), homeAddress: txt('実家の住所', 120), homeContact: txt('実家の連絡先', 60),
+    address: txt('現住所', 120), homePhone: txt('自宅の電話番号', 40), mobilePhone: txt('携帯の電話番号', 40),
+    homeAddress: txt('実家の住所', 120), homeContact: txt('実家の連絡先', 60),
     declaredIncome: num('月収（申告）', 'yen', 0, 100000000), want: num('希望額', 'yen', 10000, 100000000),
     claimReason: txt('申告した理由', 60), collateral: txt('担保', 60),
     workName: txt('勤務先名', 60), workPhone: txt('勤務先の電話番号', 40), workAddress: txt('勤務先の所在地', 120),
@@ -506,6 +520,7 @@
       customers, people: {}, loans: [], txs: [], visitor: null, nightUsed: false, log: [], over: null,
       nextLoanId: 1, nextTxId: 1, nextCustomerNo: 1 + Math.max(0, ...customers.map((c) => Number(c.id) || 0)),
       edits: [], adjust: { cash: 0, principal: 0 },   // 手で直した記録と、帳簿の差額（手持ち資金・元金残高）
+      accounts: [], nextAccountId: 1,                  // 買い取った銀行口座（在庫と転売の記録）
     };
     customers.forEach(normalizeCustomer);
     // 初めて来る日：最初の5人は決まった日、6人目からは10日目〜期間の7割のところまでに散らばる（来る順はシャッフル）
@@ -536,7 +551,8 @@
   const fuwatariDayOf = (s, loan) => nextClosingDay(Math.max(s.day, loan.lateSince + CONFIG.fuwatariDays));
   const hasGuarantor = (s, c) => !!c.guarantor && c.guarantor !== 'なし' && !s.people[c.id].guarantorGone;
   const log = (s, kind, text) => s.log.push({ day: s.day, kind, text });
-  const owedOf = (loan) => loan.principal + loan.accrued;
+  const owedOf = (loan) => loan.principal + loan.accrued + (loan.lateFee || 0);   // 完済に要る額（延滞金も含む）
+  const unpaidOf = (loan) => loan.accrued + (loan.lateFee || 0);                  // ジャンプ成立に要る額（未払いジャンプ金＋延滞金）
   const nextJumpOf = (loan) => jumpOf(loan);
 
   // 期日にかき集められる額（1,000円単位）
@@ -560,10 +576,10 @@
   function tx(s, loan, type, amount, parts) {
     s.txs.push({
       id: s.nextTxId++, day: s.day, loanId: loan.id, customerId: loan.customerId, type, amount,
-      toInterest: (parts && parts.toInterest) || 0, toPrincipal: (parts && parts.toPrincipal) || 0,
+      toInterest: (parts && parts.toInterest) || 0, toPrincipal: (parts && parts.toPrincipal) || 0, toLateFee: (parts && parts.toLateFee) || 0,
       principal: loan.principal, accrued: loan.accrued,
       ...(type === 'lend' ? { transfer: parts.transfer, fee: parts.fee } : {}),
-      ...(type === 'adjust' ? { dPrincipal: parts.dPrincipal, dAccrued: parts.dAccrued } : {}),
+      ...(type === 'adjust' ? { dPrincipal: parts.dPrincipal, dAccrued: parts.dAccrued, dLateFee: parts.dLateFee || 0 } : {}),
     });
   }
   // 取引で手持ち資金がいくら動いたか（貸付は振込金額だけ出ていく）
@@ -584,27 +600,50 @@
   function pay(s, loan, amount, type, noCash) {
     amount = Math.min(Math.floor(amount), owedOf(loan));
     if (amount <= 0) return 0;
-    const jumpDue = loan.accrued;
-    const toInterest = Math.min(amount, loan.accrued);
-    const toPrincipal = amount - toInterest;
+    const jumpDue = unpaidOf(loan);
+    const toLateFee = Math.min(amount, loan.lateFee);           // 延滞金 → ジャンプ金 → 元金 の順に充てる
+    const toInterest = Math.min(amount - toLateFee, loan.accrued);
+    const toPrincipal = amount - toLateFee - toInterest;
+    loan.lateFee -= toLateFee;
+    loan.lateFeePaid += toLateFee;
     loan.accrued -= toInterest;
     loan.principal -= toPrincipal;
     loan.collected += amount;
     loan.interestPaid += toInterest;
     if (!noCash) s.cash += amount;
-    const closed = loan.principal <= 0 && loan.accrued <= 0;
+    const closed = loan.principal <= 0 && loan.accrued <= 0 && loan.lateFee <= 0;
     if (type === 'due') {
       if (closed) type = 'payoff';
       else if (amount < jumpDue) type = 'partial';
       else { type = toPrincipal > 0 ? 'jumpPlus' : 'jump'; loan.jumps++; }
     }
-    tx(s, loan, type, amount, { toInterest, toPrincipal });
+    tx(s, loan, type, amount, { toInterest, toPrincipal, toLateFee });
     if (closed) {
       loan.principal = 0;
       loan.accrued = 0;
+      loan.lateFee = 0;
       close(s, loan, '完済');
     }
     return amount;
+  }
+
+  // 入金の内訳の文：延滞金(10,000円)＋ジャンプ(20,000円)＋元金詰め(5,000円)
+  function partsText(t) {
+    const parts = [];
+    if (t.toLateFee) parts.push(`延滞金(${yen(t.toLateFee)})`);
+    if (t.toInterest || !t.toLateFee) parts.push(`ジャンプ(${yen(t.toInterest)})`);
+    if (t.toPrincipal) parts.push(`元金詰め(${yen(t.toPrincipal)})`);
+    return parts.join('＋');
+  }
+
+  // 延滞中の貸付で、延滞金と未払いジャンプ金がそろったらジャンプ成立（次回の期日は元の予定のまま）
+  function cureIfPaid(loan) {
+    if (loan.status !== '延滞' || unpaidOf(loan) > 0) return false;
+    loan.status = '返済中';
+    loan.overdueDays = 0;
+    loan.lateSince = null;
+    loan.jumps++;
+    return true;
   }
 
   function accrue(s, loan, type) {
@@ -646,7 +685,7 @@
   }
 
   // 不明入金：誰からかわからない入金が入る。数日後、持ち主から電話があって判明する。
-  const unknownLeft = (u) => u.amount - u.allocated - u.refunded;
+  const unknownLeft = (u) => u.amount - u.allocated - u.refunded - (u.misc || 0);
 
   function unknownEvents(s) {
     for (const u of s.unknowns) {
@@ -662,7 +701,7 @@
     const amount = CONFIG.unknownMin + Math.floor(rand(s) * (steps + 1)) * CONFIG.payUnit;
     const reveal = CONFIG.revealMin + Math.floor(rand(s) * (CONFIG.revealMax - CONFIG.revealMin + 1));
     s.unknowns.push({
-      id: s.nextUnknownId++, day: s.day, amount, allocated: 0, refunded: 0, allocations: [], refunds: [],
+      id: s.nextUnknownId++, day: s.day, amount, allocated: 0, refunded: 0, misc: 0, allocations: [], refunds: [], miscs: [],
       ownerId: loan.customerId, revealDay: s.day + reveal, revealed: false,
     });
     s.cash += amount;
@@ -689,22 +728,13 @@
       status: loan.status, due: loan.due, overdueDays: loan.overdueDays, lateSince: loan.lateSince, closedDay: loan.closedDay, jumps: loan.jumps,
       nextVisit: p.nextVisit, want: p.want, visits: p.visits,
     };
-    const jumpBefore = loan.accrued;
     pay(s, loan, amount, 'allocate', true);
     const t = s.txs[s.txs.length - 1];
     u.allocated += amount;
     u.allocations.push({ day: s.day, loanId: loan.id, amount, txId: t.id, before, canceled: false, canceledDay: null });
-    const toJump = Math.min(amount, jumpBefore);
-    let text = `${fmtDay(u.day)}の不明入金から${yen(amount)}を${c.name}（No.${loan.id}）に充当。ジャンプ(${yen(toJump)})＋元金詰め(${yen(amount - toJump)})。`;
+    let text = `${fmtDay(u.day)}の不明入金から${yen(amount)}を${c.name}（No.${loan.id}）に充当。${partsText(t)}。`;
     if (loan.status === '完済') text += 'これで完済！';
-    else if (before.status === '延滞' && loan.accrued === 0) {
-      // 未払いのジャンプ金を満額払えたのでジャンプ成立。次回の期日は元の予定のまま（払った日から数え直さない）
-      loan.status = '返済中';
-      loan.overdueDays = 0;
-      loan.lateSince = null;
-      loan.jumps++;
-      text += `ジャンプ金が満額そろってジャンプ成立。次回の期日は元の予定どおり${fmtDay(loan.due)}。`;
-    }
+    else if (cureIfPaid(loan)) text += `延滞金とジャンプ金が満額そろってジャンプ成立。次回の期日は元の予定どおり${fmtDay(loan.due)}。`;
     log(s, 'plus', text);
   }
 
@@ -733,8 +763,11 @@
     const loan = loanOf(s, a.loanId), c = customerOf(s, loan.customerId), p = s.people[c.id];
     const orig = s.txs.find((t) => t.id === a.txId);
     const closedByThis = loan.status === '完済';
+    const curedByThis = a.before.status === '延滞' && loan.status !== '延滞';   // この充当で延滞が解けていた
     loan.principal += orig.toPrincipal;
     loan.accrued += orig.toInterest;
+    loan.lateFee += orig.toLateFee || 0;
+    loan.lateFeePaid -= orig.toLateFee || 0;
     loan.collected -= orig.amount;
     loan.interestPaid -= orig.toInterest;
     loan.status = a.before.status;
@@ -751,16 +784,38 @@
     u.allocated -= orig.amount;
     a.canceled = true;
     a.canceledDay = s.day;
-    tx(s, loan, 'allocCancel', -orig.amount, { toInterest: -orig.toInterest, toPrincipal: -orig.toPrincipal });
+    tx(s, loan, 'allocCancel', -orig.amount, { toInterest: -orig.toInterest, toPrincipal: -orig.toPrincipal, toLateFee: -(orig.toLateFee || 0) });
     log(s, 'minus', `${fmtDay(a.day)}の充当（${c.name} No.${loan.id} へ${yen(orig.amount)}）を取り消した。ジャンプ(${yen(orig.toInterest)})＋元金詰め(${yen(orig.toPrincipal)})を充当前に戻し、${yen(orig.amount)}は不明入金（未充当）に戻った。`);
-    // 延滞に戻した結果、本来ジャンプ金が発生する日を過ぎていたら、今日まとめて計上する
+    // 延滞に戻した結果、本来ジャンプ金が発生する日を過ぎていたら、今日まとめて計上する。延滞金もその晩の分を足す
     if (loan.status === '延滞') {
+      if (curedByThis) loan.lateFee += CONFIG.lateFeePerDay * (s.day - a.day);   // 延滞のままなら毎晩付いていたので足さない
       while (loan.due <= s.day) {
         const i = accrue(s, loan, 'lateAccrue');
         log(s, 'bad', `${c.name}の延滞中の期日（${fmtDay(loan.due)}）の分、ジャンプ金${yen(i)}を計上した。`);
         loan.due += stepOf(loan.cycle);
       }
     }
+  }
+
+  // 充当せずに売上（雑収入）へ振り替える。お金は受付日に受け取り済みなので、手持ち資金は動かない
+  function transferUnknownToIncome(s, unknownId, amount) {
+    const u = unknownOf(s, unknownId);
+    if (!u) throw new GameError('その不明入金は見つかりません');
+    const left = unknownLeft(u);
+    if (left <= 0) throw new GameError('この不明入金はもう残っていません（充当・返金・振替が済んでいます）');
+    const a = readField(num('振り替える額', 'yen', 1, left), amount);
+    u.misc = (u.misc || 0) + a;
+    (u.miscs = u.miscs || []).push({ day: s.day, amount: a, canceled: false, canceledDay: null });
+    log(s, 'plus', `${fmtDay(u.day)}の不明入金のうち${yen(a)}を、充当せずに売上（雑収入）へ振り替えた。`);
+  }
+  function cancelUnknownIncome(s, unknownId, index) {
+    const u = unknownOf(s, unknownId), m = u && u.miscs && u.miscs[index];
+    if (!m) throw new GameError('その振替は見つかりません');
+    if (m.canceled) throw new GameError('もう取り消してあります');
+    u.misc -= m.amount;
+    m.canceled = true;
+    m.canceledDay = s.day;
+    log(s, 'minus', `${fmtDay(u.day)}の不明入金の雑収入への振替（${yen(m.amount)}）を取り消した。${yen(m.amount)}は不明入金（未充当）に戻った。`);
   }
 
   // 返金（組戻し）。未充当の残りを全額返す。
@@ -780,7 +835,7 @@
   function settleDue(s, loan, paid) {
     const c = customerOf(s, loan.customerId);
     accrue(s, loan, 'accrue');
-    const jumpDue = loan.accrued;
+    const jumpDue = unpaidOf(loan);
     const owed = owedOf(loan);
     if (paid === undefined) {
       // 初回は貸した日から初回の期日まで（当日から数えて）の日数分、2回目からは S 日分かき集めてくる
@@ -809,9 +864,10 @@
       loan.lateSince = s.day;           // 遅れはじめた期日（不渡りの判定に使う）
       loan.due += stepOf(loan.cycle);   // 延滞中に次のジャンプ金が発生する日
       tx(s, loan, 'overdue', 0);
+      const fee = `今夜から延滞金が1日${yen(CONFIG.lateFeePerDay)}ずつ付く。`;
       log(s, 'bad', paid > 0
-        ? `${c.name}が${yen(paid)}だけ持ってきた。ジャンプ金に届かず延滞。未払いジャンプ金は${yen(loan.accrued)}。`
-        : `${c.name}が期日に来ない。電話にも出ない。未払いジャンプ金は${yen(loan.accrued)}。`);
+        ? `${c.name}が${yen(paid)}だけ持ってきた。ジャンプ金に届かず延滞。未払いジャンプ金は${yen(loan.accrued)}。${fee}`
+        : `${c.name}が期日に来ない。電話にも出ない。未払いジャンプ金は${yen(loan.accrued)}。${fee}`);
     }
   }
 
@@ -858,7 +914,7 @@
     const loan = {
       id: s.nextLoanId++, customerId: c.id, lent: t.principal, principal: t.principal, accrued: 0,
       interest0: t.interest, payoff0: t.payoff, rate: t.rate, cycle: t.cycle,
-      lentDay: s.day, firstDue: t.firstDue, due: t.firstDue, transfer: t.transfer, fee: t.fee, account: t.account,
+      lentDay: s.day, firstDue: t.firstDue, due: t.firstDue, transfer: t.transfer, fee: t.fee, account: t.account, lateFee: 0, lateFeePaid: 0,
       status: '返済中', overdueDays: 0, lateSince: null, jumps: 0,
       collected: 0, interestPaid: 0, closedDay: null, fuwatari: 0, fuwatariDay: null,
     };
@@ -904,7 +960,7 @@
       log(s, 'line', hit ? `${c.name}「${c.weakLine}」` : `${c.name}は${pick(s, LINES.success)}`);
       // 取り立てに成功すると、その時かき集められるだけ払ってくる（collectFullJump なら未払いジャンプ金は満額そろえてくる）
       const grab = capOf(s, c, loan.cycle);
-      let total = pay(s, loan, CONFIG.collectFullJump ? Math.max(grab, loan.accrued) : grab, 'collect');
+      let total = pay(s, loan, CONFIG.collectFullJump ? Math.max(grab, unpaidOf(loan)) : grab, 'collect');
       if (cmdKey === 'hoshonin' && loan.status === '延滞') {
         const g = pay(s, loan, CONFIG.guarantorPay, 'guarantor');
         if (g > 0) { total += g; log(s, 'info', `${c.guarantor}が${yen(g)}を肩代わりした。`); }
@@ -916,16 +972,12 @@
       }
       if (loan.status === '完済') {
         log(s, 'plus', `${yen(total)}を回収。${c.name}の借金はこれで完済！`);
-      } else if (loan.accrued === 0) {
-        // ジャンプ金が満額そろったのでジャンプ成立。次回の期日は元の予定のまま（回収した日から数え直さない）
-        loan.status = '返済中';
-        loan.overdueDays = 0;
-        loan.lateSince = null;
-        loan.jumps++;
-        log(s, 'plus', `${yen(total)}を回収。未払いジャンプ金が満額そろってジャンプ成立。残りの元金は${yen(loan.principal)}、次回の期日は元の予定どおり${fmtDay(loan.due)}。`);
+      } else if (cureIfPaid(loan)) {
+        // 延滞金とジャンプ金が満額そろったのでジャンプ成立。次回の期日は元の予定のまま（回収した日から数え直さない）
+        log(s, 'plus', `${yen(total)}を回収。延滞金と未払いジャンプ金が満額そろってジャンプ成立。残りの元金は${yen(loan.principal)}、次回の期日は元の予定どおり${fmtDay(loan.due)}。`);
       } else {
         // 満額に届かなければ、ジャンプは成立せず延滞のまま
-        log(s, 'bad', `${yen(total)}を回収。でも未払いジャンプ金があと${yen(loan.accrued)}足りず、ジャンプは成立しない。延滞のまま。`);
+        log(s, 'bad', `${yen(total)}を回収。でも延滞金と未払いジャンプ金があと${yen(unpaidOf(loan))}足りず、ジャンプは成立しない。延滞のまま。`);
       }
       if (cmdKey !== 'nakiotoshi') s.sugomi = Math.min(5, s.sugomi + 1);
     }
@@ -985,7 +1037,7 @@
     p.want = v.want;
     p.visits = visits;
     if (typeof data.guarantorGone === 'boolean') p.guarantorGone = data.guarantorGone;
-    for (const k of ['investigated', 'hiddenUsed', 'refused']) if (typeof st[k] === 'boolean') p[k] = st[k];
+    for (const k of ['investigated', 'hiddenUsed', 'refused', 'accountBought']) if (typeof st[k] === 'boolean') p[k] = st[k];
     if (newId !== id) renameCustomer(s, id, newId);
     log(s, 'info', `${c.name}（No.${c.id}）の顧客カルテを更新した。${newId !== id ? `顧客番号を${id}から${newId}に変えた。` : ''}`);
     if (visitChanged) setVisit(s, c, data.nextVisit);
@@ -1096,23 +1148,26 @@
     log(s, 'edit', `【修正】${text}`);
   }
 
-  // 入金の中身が変わったとき、貸付の残高・累計と手持ち資金を合わせる（di・dp は増えた額）
-  function payDelta(s, loan, di, dp) {
+  // 入金の中身が変わったとき、貸付の残高・累計と手持ち資金を合わせる（di・dp・dl は増えた額。noCash ならお金は動かさない）
+  function payDelta(s, loan, di, dp, dl, noCash) {
     loan.accrued -= di;
     loan.principal -= dp;
+    loan.lateFee -= dl;
     loan.interestPaid += di;
-    loan.collected += di + dp;
-    s.cash += di + dp;
+    loan.lateFeePaid += dl;
+    loan.collected += di + dp + dl;
+    if (!noCash) s.cash += di + dp + dl;
   }
 
   // 残高を直したあとの状態：返し終わったら完済、完済から残高が戻ったら返済中、不渡りは不渡り額を元金残高に合わせる
   function fixStatus(s, loan) {
     if (loan.status === '不渡り') loan.fuwatari = loan.principal;
-    else if (isActive(loan) && loan.principal <= 0 && loan.accrued <= 0) {
+    else if (isActive(loan) && loan.principal <= 0 && loan.accrued <= 0 && loan.lateFee <= 0) {
       loan.principal = 0;
       loan.accrued = 0;
+      loan.lateFee = 0;
       close(s, loan, '完済');
-    } else if (loan.status === '完済' && (loan.principal > 0 || loan.accrued > 0)) {
+    } else if (loan.status === '完済' && (loan.principal > 0 || loan.accrued > 0 || loan.lateFee > 0)) {
       loan.status = '返済中';
       loan.closedDay = null;
       while (loan.due <= s.day) loan.due += stepOf(loan.cycle);
@@ -1132,15 +1187,17 @@
     if (PAY_IN.includes(t.type)) {
       const ti = readField(num('ジャンプ金に充てた額', 'yen', 0, 100000000), d.toInterest);
       const tp = readField(num('元金に充てた額', 'yen', 0, 100000000), d.toPrincipal);
-      if (ti + tp === 0) throw new GameError('入金額が0円になります。なかったことにするなら「取り消す」を使ってください');
-      const di = ti - t.toInterest, dp = tp - t.toPrincipal;
+      const tl = readField(num('延滞金に充てた額', 'yen', 0, 100000000), d.toLateFee == null ? t.toLateFee || 0 : d.toLateFee);
+      if (ti + tp + tl === 0) throw new GameError('入金額が0円になります。なかったことにするなら「取り消す」を使ってください');
+      const di = ti - t.toInterest, dp = tp - t.toPrincipal, dl = tl - (t.toLateFee || 0);
+      if (dl > loan.lateFee) throw new GameError(`延滞金に充てられるのは、あと${yen(loan.lateFee)}までです（未払いの延滞金を超えます）`);
       if (di > loan.accrued) throw new GameError(`ジャンプ金に充てられるのは、あと${yen(loan.accrued)}までです（未払いジャンプ金を超えます）`);
       if (dp > loan.principal) throw new GameError(`元金に充てられるのは、あと${yen(loan.principal)}までです（元金残高を超えます）`);
-      if (s.cash + di + dp < 0) throw new GameError(`手持ち資金が足りません（減らした${yen(-(di + dp))}を払い戻す形になります）`);
-      payDelta(s, loan, di, dp);
+      if (s.cash + di + dp + dl < 0) throw new GameError(`手持ち資金が足りません（減らした${yen(-(di + dp + dl))}を払い戻す形になります）`);
+      payDelta(s, loan, di, dp, dl);
       const n = (x) => x.toLocaleString('ja-JP');
-      change = `ジャンプ(${n(t.toInterest)}→${n(ti)})＋元金詰め(${n(t.toPrincipal)}→${n(tp)})`;
-      Object.assign(t, { toInterest: ti, toPrincipal: tp, amount: ti + tp });
+      change = `${tl || t.toLateFee ? `延滞金(${n(t.toLateFee || 0)}→${n(tl)})＋` : ''}ジャンプ(${n(t.toInterest)}→${n(ti)})＋元金詰め(${n(t.toPrincipal)}→${n(tp)})`;
+      Object.assign(t, { toInterest: ti, toPrincipal: tp, toLateFee: tl, amount: ti + tp + tl });
     } else {
       const a = readField(num('ジャンプ金', 'yen', 0, 100000000), d.amount);
       if (loan.accrued + a - t.amount < 0) throw new GameError('もう払われたジャンプ金より少なくはできません');
@@ -1162,7 +1219,7 @@
     const loan = loanOf(s, t.loanId), c = customerOf(s, loan.customerId) || { name: '' };
     if (PAY_IN.includes(t.type)) {
       if (s.cash < t.amount) throw new GameError(`手持ち資金が足りません（取り消すと${yen(t.amount)}を払い戻す形になります）`);
-      payDelta(s, loan, -t.toInterest, -t.toPrincipal);
+      payDelta(s, loan, -t.toInterest, -t.toPrincipal, -(t.toLateFee || 0));
     } else {
       if (loan.accrued < t.amount) throw new GameError('このジャンプ金はもう払われているので取り消せません（先に入金を直してください）');
       loan.accrued -= t.amount;
@@ -1184,15 +1241,9 @@
     pay(s, loan, a, 'manual');
     const t = s.txs[s.txs.length - 1];
     t.note = memo;
-    let text = `${c.name}（No.${loan.id}）の入金${yen(a)}を手入力で記録した。ジャンプ(${num(t.toInterest)})＋元金詰め(${num(t.toPrincipal)})。`;
+    let text = `${c.name}（No.${loan.id}）の入金${yen(a)}を手入力で記録した。${partsText(t)}。`;
     if (loan.status === '完済') text += '完済！';
-    else if (wasLate && loan.accrued === 0) {
-      loan.status = '返済中';
-      loan.overdueDays = 0;
-      loan.lateSince = null;
-      loan.jumps++;
-      text += `ジャンプ金が満額そろってジャンプ成立。次回の期日は${fmtDay(loan.due)}。`;
-    }
+    else if (wasLate && cureIfPaid(loan)) text += `延滞金とジャンプ金が満額そろってジャンプ成立。次回の期日は${fmtDay(loan.due)}。`;
     log(s, 'plus', text);
     return t;
   }
@@ -1216,24 +1267,26 @@
     const account = readField(txt('⑤振込先口座', 100), d.account);
     const principal = readField(num('元金残高', 'yen', 0, 100000000), d.principal);
     const accrued = readField(num('未払いジャンプ金', 'yen', 0, 100000000), d.accrued);
+    const lateFee = readField(num('未払いの延滞金', 'yen', 0, 100000000), d.lateFee == null ? loan.lateFee : d.lateFee);
     const status = readField({ label: '状態', kind: 'select', options: STATUSES }, d.status);
     const jumps = readField(num('ジャンプ回数', 'int', 0, 10000), d.jumps);
     const late = ['延滞', '夜逃げ', '不渡り'].includes(status);
     const lateSince = late ? readField(num('遅れはじめた期日', 'day', 1, s.day), d.lateSince) : null;
     const active = status === '返済中' || status === '延滞';
     const due = active ? readField(num('次回期日', 'day', s.day + 1, CONFIG.maxDays), d.due) : loan.due;
-    if (status === '完済' && (principal > 0 || accrued > 0)) throw new GameError('完済にするなら、元金残高と未払いジャンプ金を0円にしてください');
-    if (status !== '完済' && principal === 0 && accrued === 0) throw new GameError('元金残高も未払いジャンプ金も0円なら、状態は完済にしてください');
+    if (status === '完済' && (principal > 0 || accrued > 0 || lateFee > 0)) throw new GameError('完済にするなら、元金残高・未払いジャンプ金・未払いの延滞金を0円にしてください');
+    if (status !== '完済' && principal === 0 && accrued === 0 && lateFee === 0) throw new GameError('元金残高も未払いジャンプ金も延滞金も0円なら、状態は完済にしてください');
     const dTransfer = transfer - loan.transfer;
     if (s.cash - dTransfer < 0) throw new GameError(`手持ち資金が足りません（振込金額を${yen(dTransfer)}増やすと、手持ち資金から出ていきます）`);
 
     const c = customerOf(s, loan.customerId) || { name: '' };
     const show = (k, v) => (['lentDay', 'firstDue', 'due', 'lateSince'].includes(k) ? (v ? fmtDay(v) : '—') : typeof v === 'number' && k !== 'cycle' && k !== 'jumps' ? yen(v) : v || '—');
-    const LABEL = { notation: '①', cycle: '②S', firstDue: '③初回の期日', transfer: '④振込金額', account: '⑤振込先口座', lentDay: '貸付日', principal: '元金残高', accrued: '未払いジャンプ金', due: '次回期日', status: '状態', lateSince: '遅れはじめた期日', jumps: 'ジャンプ回数' };
-    const before = { notation: notationOf(loan.lent, loan.payoff0), cycle: loan.cycle, firstDue: loan.firstDue, transfer: loan.transfer, account: loan.account, lentDay: loan.lentDay, principal: loan.principal, accrued: loan.accrued, due: loan.due, status: loan.status, lateSince: loan.lateSince, jumps: loan.jumps };
+    const LABEL = { notation: '①', cycle: '②S', firstDue: '③初回の期日', transfer: '④振込金額', account: '⑤振込先口座', lentDay: '貸付日', principal: '元金残高', accrued: '未払いジャンプ金', lateFee: '未払いの延滞金', due: '次回期日', status: '状態', lateSince: '遅れはじめた期日', jumps: 'ジャンプ回数' };
+    const before = { notation: notationOf(loan.lent, loan.payoff0), cycle: loan.cycle, firstDue: loan.firstDue, transfer: loan.transfer, account: loan.account, lentDay: loan.lentDay, principal: loan.principal, accrued: loan.accrued, lateFee: loan.lateFee, due: loan.due, status: loan.status, lateSince: loan.lateSince, jumps: loan.jumps };
     const dLent = lent - loan.lent;
     const adjP = principal - (loan.principal + dLent);   // ①の元金を変えて動く分のほかに、元金残高を手で直した分
     const adjA = accrued - loan.accrued;
+    const adjL = lateFee - loan.lateFee;
 
     s.cash -= dTransfer;
     const lendTx = s.txs.find((t) => t.loanId === id && t.type === 'lend');
@@ -1241,10 +1294,10 @@
     const feeTx = s.txs.find((t) => t.loanId === id && t.type === 'fee');
     if (feeTx && fee > 0) Object.assign(feeTx, { amount: fee, day: lentDay });
     else if (feeTx) s.txs = s.txs.filter((t) => t !== feeTx);
-    Object.assign(loan, { lent, payoff0: payoff, interest0, rate, cycle, lentDay, firstDue, transfer, fee, account, principal, accrued, jumps });
+    Object.assign(loan, { lent, payoff0: payoff, interest0, rate, cycle, lentDay, firstDue, transfer, fee, account, principal, accrued, lateFee, jumps });
     if (!feeTx && fee > 0) { tx(s, loan, 'fee', fee); s.txs[s.txs.length - 1].day = lentDay; }
-    if (adjP || adjA) {
-      tx(s, loan, 'adjust', 0, { dPrincipal: adjP, dAccrued: adjA });
+    if (adjP || adjA || adjL) {
+      tx(s, loan, 'adjust', 0, { dPrincipal: adjP, dAccrued: adjA, dLateFee: adjL });
       s.adjust.principal += adjP;
     }
     const was = loan.status;
@@ -1256,8 +1309,8 @@
     if (status === '完済' && was !== '完済') close(s, loan, '完済');
     loan.fuwatari = status === '不渡り' ? principal : 0;
     loan.fuwatariDay = status === '不渡り' ? (was === '不渡り' && loan.fuwatariDay ? loan.fuwatariDay : s.day) : null;
-    loan.collected = loan.interestPaid + loan.lent - loan.principal;
-    const after = { notation: notationOf(lent, payoff), cycle, firstDue, transfer, account, lentDay, principal, accrued, due: loan.due, status, lateSince, jumps };
+    loan.collected = loan.interestPaid + loan.lateFeePaid + loan.lent - loan.principal;
+    const after = { notation: notationOf(lent, payoff), cycle, firstDue, transfer, account, lentDay, principal, accrued, lateFee, due: loan.due, status, lateSince, jumps };
     const diff = Object.keys(LABEL).filter((k) => before[k] !== after[k]).map((k) => `${LABEL[k]} ${show(k, before[k])}→${show(k, after[k])}`);
     noteEdit(s, `貸付No.${id}（${c.name}）：${diff.length ? diff.join('、') : '変更なし'}`);
   }
@@ -1280,7 +1333,7 @@
   function editUnknown(s, id, d) {
     const u = unknownOf(s, id);
     if (!u) throw new GameError('その不明入金は見つかりません');
-    const used = u.allocated + u.refunded;
+    const used = u.allocated + u.refunded + (u.misc || 0);
     const amount = readField(num('不明入金の金額', 'yen', Math.max(1, used), 100000000), d.amount);
     const day = readField(num('受付日', 'day', 1, s.day), d.day);
     if (s.cash + amount - u.amount < 0) throw new GameError('手持ち資金が足りません');
@@ -1293,7 +1346,7 @@
   function deleteUnknown(s, id) {
     const u = unknownOf(s, id);
     if (!u) throw new GameError('その不明入金は見つかりません');
-    if (u.allocated > 0 || u.refunded > 0) throw new GameError('充当か返金が済んでいる不明入金は消せません（先に充当を取り消してください）');
+    if (u.allocated > 0 || u.refunded > 0 || u.misc > 0) throw new GameError('充当・返金・雑収入への振替が済んでいる不明入金は消せません（先に充当や振替を取り消してください）');
     if (s.cash < u.amount) throw new GameError('手持ち資金が足りません');
     s.cash -= u.amount;
     s.unknowns = s.unknowns.filter((x) => x !== u);
@@ -1315,6 +1368,83 @@
     s.log.push({ day: s.day, kind: 'note', text: readField(txt('日誌', 500, true), text), manual: true });
   }
 
+  // ---- 口座の買取・転売 ----
+
+  const accountOf = (s, id) => s.accounts.find((a) => a.id === id);
+
+  // 延滞中で連絡のつく客から、銀行口座を1通買い取る（客1人につき1通）。
+  //   offset なら代金を返済に充てる（延滞金 → ジャンプ金 → 元金の順。お金は動かない）。そうでなければ現金で渡す
+  function buyAccount(s, loanId, d) {
+    const loan = loanOf(s, loanId);
+    if (!loan || loan.status !== '延滞') throw new GameError('口座を買い取れるのは、延滞中で連絡のつく客だけです');
+    const c = customerOf(s, loan.customerId), p = s.people[c.id];
+    if (p.accountBought) throw new GameError(`${c.name}の口座はもう買い取ってあります（1人1通まで）`);
+    const price = readField(num('買取額', 'yen', 1, 10000000), d.price);
+    const offset = !!d.offset;
+    if (offset && price > owedOf(loan)) throw new GameError(`返済に充てられるのは、残り（${yen(owedOf(loan))}）までです`);
+    if (!offset && s.cash < price) throw new GameError(`手持ち資金が足りません（買取額 ${yen(price)}）`);
+    const acc = { id: s.nextAccountId++, customerId: c.id, loanId, day: s.day, cost: price, offset, txId: null, sold: null, canceled: false, canceledDay: null };
+    let text = `${c.name}（No.${loan.id}）から銀行口座を1通、${yen(price)}で買い取った。`;
+    if (offset) {
+      pay(s, loan, price, 'offset', true);
+      const t = s.txs[s.txs.length - 1];
+      acc.txId = t.id;
+      text += `代金は返済に充てた（${partsText(t)}）。`;
+      if (loan.status === '完済') text += 'これで完済！';
+      else if (cureIfPaid(loan)) text += `延滞金とジャンプ金がそろってジャンプ成立。次回の期日は${fmtDay(loan.due)}。`;
+    } else {
+      s.cash -= price;
+      text += '代金は現金で渡した。';
+    }
+    s.accounts.push(acc);
+    p.accountBought = true;
+    log(s, 'minus', `${text}転売するまで在庫に置く。`);
+    return acc;
+  }
+
+  // 在庫の口座をほかの業者に転売する。転売額 − 買取額 が売上（口座の転売益）。足がつきやすいので警察の目が上がる
+  function sellAccount(s, id, d) {
+    const acc = accountOf(s, id);
+    if (!acc || acc.canceled) throw new GameError('その口座は見つかりません');
+    if (acc.sold) throw new GameError('その口座はもう転売してあります');
+    const price = readField(num('転売額', 'yen', 1, 10000000), d.price);
+    s.cash += price;
+    acc.sold = { day: s.day, price };
+    s.police += CONFIG.accountPolice;
+    const c = customerOf(s, acc.customerId) || { name: '' };
+    const gain = price - acc.cost;
+    log(s, gain >= 0 ? 'plus' : 'bad', `${c.name}の口座をほかの業者に${yen(price)}で転売した。転売益${gain >= 0 ? '' : '（損）'}${yen(gain)}を売上に計上。警察の目が${CONFIG.accountPolice}上がった。`);
+  }
+
+  // 取り消す。転売済みなら転売だけ取り消して在庫に戻す（警察の目は戻らない）。在庫なら買取を取り消す
+  function cancelAccount(s, id) {
+    const acc = accountOf(s, id);
+    if (!acc || acc.canceled) throw new GameError('その口座は見つかりません');
+    const c = customerOf(s, acc.customerId) || { name: '' };
+    if (acc.sold) {
+      if (s.cash < acc.sold.price) throw new GameError(`手持ち資金が足りません（転売額 ${yen(acc.sold.price)} を戻す形になります）`);
+      s.cash -= acc.sold.price;
+      log(s, 'minus', `${c.name}の口座の転売（${yen(acc.sold.price)}）を取り消した。口座は在庫に戻った。`);
+      acc.sold = null;
+      return;
+    }
+    if (acc.offset) {
+      const t = s.txs.find((x) => x.id === acc.txId), loan = loanOf(s, acc.loanId);
+      if (t && !t.canceled) {
+        payDelta(s, loan, -t.toInterest, -t.toPrincipal, -(t.toLateFee || 0), true);
+        t.canceled = true;
+        t.canceledDay = s.day;
+        fixStatus(s, loan);
+      }
+    } else {
+      s.cash += acc.cost;
+    }
+    acc.canceled = true;
+    acc.canceledDay = s.day;
+    if (s.people[acc.customerId]) s.people[acc.customerId].accountBought = false;
+    log(s, 'minus', `${c.name}の口座の買取（${yen(acc.cost)}）を取り消した。${acc.offset ? '返済に充てた分も元に戻した。' : '代金は返してもらった。'}`);
+  }
+
   // 取引明細の残高（取引ごとに、そのあとの元金残高・未払いジャンプ金）。直した取引も反映して数え直す
   function balancesOf(s, loan) {
     const out = {};
@@ -1334,6 +1464,9 @@
   // 前の版の保存データを今の形にそろえる
   function migrate(s) {
     s.customers.forEach(normalizeCustomer);
+    for (const l of s.loans) { if (l.lateFee == null) l.lateFee = 0; if (l.lateFeePaid == null) l.lateFeePaid = 0; }
+    for (const u of s.unknowns) { if (u.misc == null) u.misc = 0; if (!u.miscs) u.miscs = []; }
+    if (!s.accounts) { s.accounts = []; s.nextAccountId = 1; }
     if (!s.edits) s.edits = [];
     if (!s.adjust) s.adjust = { cash: 0, principal: 0 };
     if (s.nextCustomerNo == null) s.nextCustomerNo = 1 + Math.max(0, ...s.customers.map((c) => Number(c.id) || 0));
@@ -1360,7 +1493,7 @@
         tx(s, loan, 'flee', 0);
         close(s, loan, '夜逃げ');
         log(s, 'bad', `${c.name}が夜逃げした。部屋には「${c.kuchiguse}」と書かれた置き手紙だけ。電話もつながらない。元金${yen(loan.principal)}は${fmtDay(fuwatariDayOf(s, loan))}の締めで不渡りに計上する。`);
-      }
+      } else loan.lateFee += CONFIG.lateFeePerDay;   // 延滞金：延滞1日につき
     }
 
     townEvent(s);
@@ -1497,28 +1630,27 @@
     const got = pay(s, loan, amount, 'windfall');
     if (loan.status === '完済') return got;
     if (earlyJump) { loan.due += stepOf(loan.cycle); loan.jumps++; }   // 次の期日の分は払い済み
-    else if (loan.status === '延滞' && loan.accrued === 0) {
-      loan.status = '返済中';
-      loan.overdueDays = 0;
-      loan.lateSince = null;
-      loan.jumps++;
-    }
+    else cureIfPaid(loan);
     return got;
   }
 
   // ---- 集計（台帳・カレンダー・元金表で使う） ----
 
-  // 損益。純利 = 総売上（回収したジャンプ金＋振込手数料）− 経費 − 不渡り（締めで計上した元金）
+  // 損益。純利 = 総売上 − 経費 − 不渡り（締めで計上した元金）
+  //   総売上 = 回収したジャンプ金 ＋ 振込手数料 ＋ 回収した延滞金 ＋ 雑収入（不明入金からの振替）＋ 口座の転売益
   function pl(s) {
     const jumpSales = s.loans.reduce((a, l) => a + l.interestPaid, 0);
     const feeSales = s.loans.reduce((a, l) => a + l.fee, 0);
-    const sales = jumpSales + feeSales;
+    const lateFeeSales = s.loans.reduce((a, l) => a + (l.lateFeePaid || 0), 0);
+    const miscSales = s.unknowns.reduce((a, u) => a + (u.misc || 0), 0);
+    const accountSales = (s.accounts || []).filter((x) => !x.canceled && x.sold).reduce((a, x) => a + x.sold.price - x.cost, 0);
+    const sales = jumpSales + feeSales + lateFeeSales + miscSales + accountSales;
     const expenses = s.costs.reduce((a, c) => a + c.amount, 0);
     const fuwatari = s.loans.reduce((a, l) => a + l.fuwatari, 0);
     const byKind = {};
     for (const c of s.costs) byKind[c.kind] = (byKind[c.kind] || 0) + c.amount;
     const adj = s.adjust || { cash: 0, principal: 0 };
-    return { sales, jumpSales, feeSales, expenses, fuwatari, net: sales - expenses - fuwatari, byKind, adjCash: adj.cash, adjPrincipal: adj.principal };
+    return { sales, jumpSales, feeSales, lateFeeSales, miscSales, accountSales, expenses, fuwatari, net: sales - expenses - fuwatari, byKind, adjCash: adj.cash, adjPrincipal: adj.principal };
   }
 
   // 次の締めで不渡りになる見込みの貸付（夜逃げして、締めの日に期日から2週間以上たっているもの）
@@ -1532,7 +1664,8 @@
   }
 
   function totals(s) {
-    const t = { lent: 0, balance: 0, accrued: 0, interestPaid: 0, principalBack: 0, collected: 0, active: 0, overdue: 0, jumps: 0, unknownHeld: 0, unknownOpen: 0, fled: 0, fledCount: 0, fuwatari: 0, fuwatariCount: 0 };
+    const t = { lent: 0, balance: 0, accrued: 0, lateFee: 0, interestPaid: 0, principalBack: 0, collected: 0, active: 0, overdue: 0, jumps: 0, unknownHeld: 0, unknownOpen: 0, fled: 0, fledCount: 0, fuwatari: 0, fuwatariCount: 0, accountStock: 0, accountStockCount: 0 };
+    for (const a of s.accounts || []) if (!a.canceled && !a.sold) { t.accountStock += a.cost; t.accountStockCount++; }   // 転売待ちの口座（買取額）
     for (const u of s.unknowns) {
       t.unknownHeld += unknownLeft(u);
       if (unknownLeft(u) > 0) t.unknownOpen++;
@@ -1544,7 +1677,7 @@
       t.jumps += l.jumps;
       t.principalBack += l.lent - l.principal;   // 回収累計 = ジャンプ金累計 + 回収済元金
       if (onBooks(l)) t.balance += l.principal;   // 貸付総元金（夜逃げも不渡りに計上するまで入る）
-      if (isActive(l)) { t.accrued += l.accrued; t.active++; }
+      if (isActive(l)) { t.accrued += l.accrued; t.lateFee += l.lateFee || 0; t.active++; }
       if (l.status === '延滞') t.overdue++;
       if (l.status === '夜逃げ') { t.fled += l.principal; t.fledCount++; }
       if (l.status === '不渡り') { t.fuwatari += l.fuwatari; t.fuwatariCount++; }
@@ -1589,6 +1722,7 @@
         balance: loans.filter(onBooks).reduce((a, l) => a + l.principal, 0),
         fuwatari: loans.reduce((a, l) => a + l.fuwatari, 0),
         accrued: active.reduce((a, l) => a + l.accrued, 0),
+        lateFee: active.reduce((a, l) => a + (l.lateFee || 0), 0),
         nextDue: dues.length ? Math.min(...dues) : null,
         collected: loans.reduce((a, l) => a + l.collected, 0),
         interestPaid: loans.reduce((a, l) => a + l.interestPaid, 0),
@@ -1605,7 +1739,8 @@
     PROFILE, SECRET, EMERGENCY_ROWS, SOURCES, WEAK_TYPES, sourceText, updateCustomer, addCustomer,
     canDeleteCustomer, deleteCustomer, restoreCustomer, rosterOf, migrate, exportCustomers,
     STATUSES, PAY_IN, canEditTx, editTx, cancelTx, recordPayment, editLoan, editShop, editUnknown, deleteUnknown,
-    editLog, deleteLog, addNote, balancesOf,
+    editLog, deleteLog, addNote, balancesOf, unpaidOf, transferUnknownToIncome, cancelUnknownIncome,
+    accountOf, buyAccount, sellAccount, cancelAccount,
     COSTS, pl, fuwatariPlan, closingOf, nextClosingDay, lateDaysOf, fuwatariDayOf, onBooks,
     totals, schedule, ledger, nigeChance, capRange, owedOf, nextJumpOf, isActive,
     visitorOf, customerOf, loanOf, hasGuarantor,

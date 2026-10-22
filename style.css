@@ -107,6 +107,7 @@ td .sub, .facts .sub { display: block; margin-left: 0; }
 /* ---- 集計の数字 ---- */
 .stat-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .stat-row.six { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.stat-row.five { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .stat-row.eight { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .stat-row.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .stat em, .day-sum em { display: block; font-style: normal; font-size: 11px; color: var(--muted); margin-top: 2px; }
@@ -347,6 +348,7 @@ b.unk { color: #5b2d91; }
 .primary.small { padding: 4px 12px; font-size: 13px; }
 .choice { display: grid; gap: 4px; margin: 10px 0; }
 .choice button { justify-self: start; }
+.choice-row { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 
 /* ---- 直す・入金台帳 ---- */
 .mark { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 6px; margin-right: 6px; border-radius: 8px; background: var(--gray-soft); color: var(--ink-2); vertical-align: 1px; }
@@ -451,7 +453,7 @@ b.unk { color: #5b2d91; }
   .tab { padding: 10px 10px 8px; font-size: 13px; }
   .view { padding: 12px 16px; }
   .panel { padding: 12px 14px; }
-  .stat-row, .stat-row.three, .stat-row.four, .stat-row.six, .stat-row.eight { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .stat-row, .stat-row.three, .stat-row.four, .stat-row.five, .stat-row.six, .stat-row.eight { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .field.two { grid-template-columns: 1fr; }
   .cust-form .grid2 { grid-template-columns: 1fr; }
   .em-row { grid-template-columns: 18px minmax(0, 1fr); }
