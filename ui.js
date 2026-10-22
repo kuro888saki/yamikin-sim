@@ -90,7 +90,9 @@
   function loadSave() {
     try {
       const d = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
-      return d && d.s && d.s.v === 7 ? d : null;
+      if (!d || !d.s || !(d.s.v === 7 || d.s.v === 8)) return null;
+      G.migrate(d.s);   // 前の版の保存データに、カルテの新しい項目をそろえる
+      return d;
     } catch (e) { return null; }
   }
   function clearSave() {
@@ -138,7 +140,7 @@
   function start(list) {
     s = G.newGame(list, (Date.now() ^ Math.floor(Math.random() * 1e9)) >>> 0);
     mark = 0;
-    Object.assign(ui, { view: 'today', calDay: null, calMonth: 0, calCustomer: '', drawer: null, alloc: null, resultClosed: false });
+    Object.assign(ui, { view: 'today', calDay: null, calMonth: 0, calCustomer: '', drawer: null, alloc: null, resultClosed: false, reset: false, skip: null });
     form.visitor = null;
     $('#result').hidden = true;
     save();
@@ -146,10 +148,14 @@
     window.scrollTo(0, 0);
   }
 
-  async function restart() {
+  // 最初から。fromCsv なら customers.csv を読み直し、そうでなければ今の顧客台帳（編集・追加した客）を引き継ぐ
+  async function restart(fromCsv) {
+    const roster = s ? G.rosterOf(s) : [];
+    const list = fromCsv || !roster.length ? await fetchCustomers() : roster;
+    if (!list) return;
     clearSave();
-    const list = await fetchCustomers();
-    if (list) start(list);
+    start(list);
+    toast(fromCsv || !roster.length ? 'customers.csv を読み直して、1日目から始めました' : `今の顧客台帳（${list.length}名）で、1日目から始めました`);
   }
 
   // ---- 操作 ----
@@ -201,7 +207,11 @@
       if (!s.over) window.scrollTo({ top: 0, behavior: 'smooth' });
     } else if (a === 'open-customer') { ui.drawer = { kind: 'customer', id: el.dataset.id }; renderDrawer(true); }
     else if (a === 'open-loan') { ui.drawer = { kind: 'loan', id: Number(el.dataset.id) }; renderDrawer(true); }
-    else if (a === 'close-drawer') { ui.drawer = null; renderDrawer(); }
+    else if (a === 'close-drawer') {
+      if (ui.drawer && ui.drawer.edit && !window.confirm('編集中の内容は保存されません。閉じますか？')) return;
+      ui.drawer = null;
+      renderDrawer();
+    }
     else if (a === 'goto-day') {
       const d = Number(el.dataset.day);
       Object.assign(ui, { view: 'calendar', calDay: d, calMonth: monthOffsetOf(d), drawer: null });
@@ -227,17 +237,29 @@
     }
     else if (a === 'cal-day') { ui.calDay = Number(el.dataset.day); renderView(); }
     else if (a === 'filter') { ui[el.dataset.scope].status = el.dataset.value; renderView(); }
-    else if (a === 'restart') restart();
-    else if (a === 'reset') {
-      if (window.confirm('台帳（customers.csv）を読み直して、1日目からやり直します。今の進み具合は消えます。よろしいですか？')) restart();
-    }
+    else if (a === 'restart' || a === 'reset') { ui.reset = true; renderReset(); }
+    else if (a === 'reset-roster' || a === 'reset-csv') { ui.reset = false; renderReset(); restart(a === 'reset-csv'); }
+    else if (a === 'reset-close') { ui.reset = false; renderReset(); }
+    else if (a === 'cust-new') { ui.drawer = { kind: 'customer', id: null, edit: true }; renderDrawer(true); }
+    else if (a === 'cust-edit') { ui.drawer = { kind: 'customer', id: el.dataset.id, edit: true }; renderDrawer(true); }
+    else if (a === 'cust-cancel') { ui.drawer = ui.drawer.id ? { kind: 'customer', id: ui.drawer.id } : null; renderDrawer(true); }
+    else if (a === 'cust-delete') {
+      const id = el.dataset.id, chk = G.canDeleteCustomer(s, id);
+      if (!chk.ok) { toast(chk.reason); return; }
+      const c = G.customerOf(s, id);
+      const msg = chk.keepsRecord
+        ? `${c.name}（No.${id}）を顧客台帳から外します。\n取引の記録（元金表・カレンダー・損益）は残り、あとで元に戻せます。よろしいですか？`
+        : `${c.name}（No.${id}）を顧客台帳から削除します。\nカルテの内容は消え、元に戻せません。よろしいですか？`;
+      if (window.confirm(msg)) act(() => { const r = G.deleteCustomer(s, id); ui.drawer = r === 'archived' ? { kind: 'customer', id } : null; });
+    } else if (a === 'cust-restore') act(() => G.restoreCustomer(s, el.dataset.id));
   });
 
   // 行や日付マスをキーボードでも開けるようにする
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && ui.alloc) { ui.alloc = null; renderAlloc(); return; }
     if (ev.key === 'Escape' && ui.period) { ui.period = null; renderPeriod(); renderResult(); return; }
-    if (ev.key === 'Escape' && ui.drawer) { ui.drawer = null; renderDrawer(); return; }
+    if (ev.key === 'Escape' && ui.reset) { ui.reset = false; renderReset(); return; }
+    if (ev.key === 'Escape' && ui.drawer && !ui.drawer.edit) { ui.drawer = null; renderDrawer(); return; }   // 編集中は「やめる」で閉じる
     const el = ev.target;
     if ((ev.key === 'Enter' || ev.key === ' ') && el.getAttribute && el.getAttribute('role') === 'button' && el.tagName !== 'BUTTON') {
       ev.preventDefault();
@@ -251,6 +273,11 @@
       const u = G.unknownOf(s, ui.alloc.id);
       const amount = ui.alloc.amount == null ? G.unknownLeft(u) : ui.alloc.amount;
       act(() => { G.allocateUnknown(s, ui.alloc.id, ui.alloc.loanId, amount); ui.alloc = null; });
+      return;
+    }
+    if (ev.target.id === 'cust-form') {
+      ev.preventDefault();
+      saveCustomerForm(ev.target);
       return;
     }
     if (ev.target.id === 'period-form') {
@@ -289,6 +316,8 @@
     else if (t.id === 'cal-customer') { ui.calCustomer = t.value; renderView(); }
     else if (t.id === 'alloc-loan') { ui.alloc.loanId = t.value ? Number(t.value) : ''; updateAllocPreview(); }
     else if (t.id === 'cal-month-select') { ui.calMonth = Number(t.value); renderView(); }
+    else if (t.name === 'auto' && t.form && t.form.id === 'cust-form') { $('#secret-fields').hidden = t.checked; }
+    else if (t.name === 'source' && t.form && t.form.id === 'cust-form') { $('#cf-referrer').closest('.field').classList.toggle('dim', t.value !== '紹介'); }
     else if (t.id === 'period-end') {
       // 目標を標準のまま触っていなければ、新しい期間の標準に合わせる
       const wasStd = ui.period.goal === G.goalFor(ui.period.end);
@@ -310,6 +339,7 @@
     renderResult();
     renderAlloc();
     renderPeriod();
+    renderReset();
   }
 
   function renderKpis() {
@@ -579,7 +609,7 @@
           <dt>年齢・職業</dt><dd>${c.age}歳・${esc(c.job)}</dd>
           <dt>月収</dt><dd>${income}</dd>
           <dt>担保</dt><dd>${esc(c.collateral)}</dd>
-          <dt>保証人</dt><dd>${esc(c.guarantor)}</dd>
+          <dt>保証人</dt><dd>${guarantorText(c, p)}</dd>
         </dl>
         <div class="secret">${secret}</div>
         ${terms}
@@ -698,15 +728,17 @@
     const rows = G.ledger(s);
     const counts = {};
     rows.forEach((r) => { counts[r.status] = (counts[r.status] || 0) + 1; });
-    const order = ['来店中', '返済中', '延滞', '完済', '夜逃げ', '不渡り', 'まだ来ていない', '断った'];
-    const chips = [['すべて', rows.length], ...order.filter((k) => counts[k]).map((k) => [k, counts[k]])].map(([k, n]) =>
+    const order = ['来店中', '返済中', '延滞', '完済', '夜逃げ', '不渡り', 'まだ来ていない', '断った', '削除済み'];
+    const live = rows.filter((r) => !r.c.deleted).length;
+    const chips = [['すべて', live], ...order.filter((k) => counts[k]).map((k) => [k, counts[k]])].map(([k, n]) =>
       `<button class="filter ${ui.cust.status === k ? 'on' : ''}" data-act="filter" data-scope="cust" data-value="${k}">${k}<span>${n}</span></button>`).join('');
     const sorts = Object.entries(CUST_SORTS).map(([k, [label]]) => `<option value="${k}" ${ui.cust.sort === k ? 'selected' : ''}>${label}</option>`).join('');
     return `
       <section class="panel">
-        <header class="panel-h"><h2>顧客台帳</h2><span class="sub">${rows.length}名 ・ 行をクリックすると顧客カルテが開きます</span></header>
+        <header class="panel-h"><h2>顧客台帳</h2><span class="sub">${live}名 ・ 行をクリックすると顧客カルテが開きます</span>
+          <button class="primary small right" data-act="cust-new">＋ 顧客を追加</button></header>
         <div class="toolbar">
-          <input type="search" id="cust-q" value="${esc(ui.cust.q)}" placeholder="氏名・ふりがな・職業で検索" aria-label="顧客を検索">
+          <input type="search" id="cust-q" value="${esc(ui.cust.q)}" placeholder="氏名・ふりがな・職業・住所・勤務先・流入元で検索" aria-label="顧客を検索">
           <div class="filters">${chips}</div>
           <select id="cust-sort" aria-label="並び順">${sorts}</select>
         </div>
@@ -719,12 +751,13 @@
     if (!box) return;
     const q = ui.cust.q.trim();
     let rows = G.ledger(s);
-    if (ui.cust.status !== 'すべて') rows = rows.filter((r) => r.status === ui.cust.status);
-    if (q) rows = rows.filter((r) => [r.c.name, r.c.kana, r.c.job, r.c.id].some((f) => f.includes(q)));
+    if (ui.cust.status === 'すべて') rows = rows.filter((r) => !r.c.deleted);   // 台帳から外した客は「削除済み」で見る
+    else rows = rows.filter((r) => r.status === ui.cust.status);
+    if (q) rows = rows.filter((r) => [r.c.name, r.c.kana, r.c.job, r.c.id, r.c.address, r.c.workName, G.sourceText(r.c)].some((f) => String(f || '').includes(q)));
     rows.sort(CUST_SORTS[ui.cust.sort][1]);
     if (!rows.length) { box.innerHTML = '<p class="empty">条件に合う顧客はいません。</p>'; return; }
     box.innerHTML = `<div class="table-wrap"><table class="data">
-      <thead><tr><th>No</th><th>氏名</th><th>職業</th><th>状態</th><th class="num">貸付総元金</th><th class="num">未払いジャンプ金</th>
+      <thead><tr><th>No</th><th>氏名</th><th>職業</th><th>流入元</th><th>状態</th><th class="num">貸付総元金</th><th class="num">未払いジャンプ金</th>
         <th>次回期日</th><th>条件</th><th class="num">ジャンプ</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th>調査</th></tr></thead>
       <tbody>${rows.map((r) => {
         const live = r.loans.filter(G.isActive);
@@ -733,6 +766,7 @@
           <td>${esc(r.c.id)}</td>
           <td><b>${esc(r.c.name)}</b><span class="sub">${esc(r.c.kana)}</span></td>
           <td>${esc(r.c.job)}</td>
+          <td>${r.c.source ? esc(r.c.source) : '<span class="muted">—</span>'}${r.c.source === '紹介' && r.c.referrer ? `<span class="sub">${esc(r.c.referrer)}</span>` : ''}</td>
           <td>${badge(r.status)}</td>
           <td class="num">${r.balance ? yen(r.balance) : '—'}</td>
           <td class="num">${r.accrued ? yen(r.accrued) : '—'}</td>
@@ -1208,11 +1242,17 @@
   function renderDrawer(focus) {
     const el = $('#drawer'), scrim = $('#scrim');
     if (!ui.drawer || !s) { el.hidden = true; scrim.hidden = true; return; }
-    el.innerHTML = ui.drawer.kind === 'customer' ? customerCard(ui.drawer.id) : loanCard(ui.drawer.id);
+    el.innerHTML = ui.drawer.kind === 'loan' ? loanCard(ui.drawer.id) : ui.drawer.edit ? customerForm(ui.drawer.id) : customerCard(ui.drawer.id);
     el.hidden = false;
     scrim.hidden = false;
     if (focus) { el.scrollTop = 0; el.focus({ preventScroll: true }); }
   }
+
+  // 空欄は「未入力」と出す
+  const val = (x) => (x === '' || x == null ? '<span class="muted">未入力</span>' : esc(x));
+  const guarantorText = (c, p) => (c.guarantor
+    ? `${esc(c.guarantor)}${c.guarantorRelation ? `（${esc(c.guarantorRelation)}）` : ''}${p.guarantorGone ? ' <span class="bad">連絡不可</span>' : ''}`
+    : 'なし');
 
   function customerCard(id) {
     const r = G.ledger(s).find((x) => x.c.id === id);
@@ -1224,13 +1264,17 @@
       for (const e of sched[d]) if (e.customer.id === id) dues.push({ d, e });
     }
     const txs = s.txs.filter((t) => t.customerId === id && t.type !== 'accrue').reverse();
-    const guarantor = c.guarantor === 'なし' ? 'なし' : `${esc(c.guarantor)}${p.guarantorGone ? ' <span class="bad">（連絡不可）</span>' : ''}`;
+    const emergency = c.emergency.filter((e) => e.name || e.relation || e.contact);
+    const visit = s.visitor === id ? '<span class="ok">来店中</span>' : p.nextVisit ? dayLink(p.nextVisit) : '<span class="muted">未定</span>';
+    const del = G.canDeleteCustomer(s, id);
     return `
       <header class="drawer-h">
         <div><span class="no">顧客カルテ ・ No.${esc(c.id)}</span><h2>${esc(c.name)}<small>${esc(c.kana)}</small></h2></div>
         ${badge(r.status)}
+        ${c.deleted ? '' : `<button class="ghost small" data-act="cust-edit" data-id="${esc(c.id)}">編集</button>`}
         <button class="close" data-act="close-drawer" aria-label="閉じる">×</button>
       </header>
+      ${c.deleted ? `<p class="verdict warn">台帳から外した客です。取引の記録だけ残しています。<button class="link" data-act="cust-restore" data-id="${esc(c.id)}">台帳に戻す</button></p>` : ''}
       <div class="stat-row three tight">
         <div class="stat"><span>貸付残高</span><b>${yen(r.balance)}</b></div>
         <div class="stat"><span>未払いジャンプ金</span><b>${yen(r.accrued)}</b></div>
@@ -1240,16 +1284,42 @@
         <div class="stat"><span>ジャンプ回数</span><b>${r.jumps}回</b></div>
       </div>
       ${collectedLine(r.interestPaid, r.principalBack)}
-      <h3 class="sec">基本情報（申告どおり）</h3>
+      <h3 class="sec">基本情報</h3>
       <dl class="facts">
-        <dt>年齢・職業</dt><dd>${c.age}歳・${esc(c.job)}</dd>
+        <dt>年齢・職業</dt><dd>${c.age}歳・${val(c.job)}</dd>
+        <dt>現住所</dt><dd>${val(c.address)}</dd>
+        <dt>実家の住所</dt><dd>${val(c.homeAddress)}</dd>
+        <dt>実家の連絡先</dt><dd>${val(c.homeContact)}</dd>
+        <dt>流入元</dt><dd>${c.source ? esc(G.sourceText(c)) : val('')}</dd>
+        <dt>来店回数</dt><dd>${p.visits}回</dd>
+        <dt>次の来店予定</dt><dd>${visit}</dd>
+      </dl>
+      <h3 class="sec">申告と希望</h3>
+      <dl class="facts">
         <dt>月収（申告）</dt><dd>${yen(c.declaredIncome)}</dd>
         <dt>希望額</dt><dd>${yen(p.want)}</dd>
-        <dt>申告した理由</dt><dd>${esc(c.claimReason)}</dd>
-        <dt>担保</dt><dd>${esc(c.collateral)}</dd>
-        <dt>保証人</dt><dd>${guarantor}</dd>
-        <dt>来店回数</dt><dd>${p.visits}回</dd>
+        <dt>申告した理由</dt><dd>${val(c.claimReason)}</dd>
+        <dt>担保</dt><dd>${val(c.collateral)}</dd>
       </dl>
+      <h3 class="sec">勤務先</h3>
+      <dl class="facts">
+        <dt>勤務先名</dt><dd>${val(c.workName)}</dd>
+        <dt>電話番号</dt><dd>${val(c.workPhone)}</dd>
+        <dt>所在地</dt><dd>${val(c.workAddress)}</dd>
+        <dt>勤務時間</dt><dd>${val(c.workHours)}</dd>
+        <dt>休日</dt><dd>${val(c.workHoliday)}</dd>
+        <dt>給料日</dt><dd>${val(c.payday)}</dd>
+      </dl>
+      <h3 class="sec">保証人</h3>
+      <dl class="facts">
+        <dt>氏名（関係）</dt><dd>${guarantorText(c, p)}</dd>
+        ${c.guarantor ? `<dt>連絡先</dt><dd>${val(c.guarantorContact)}</dd>` : ''}
+      </dl>
+      <h3 class="sec">緊急連絡先 <span class="sub">${emergency.length}/${G.EMERGENCY_ROWS}名</span></h3>
+      ${emergency.length ? `<div class="table-wrap"><table class="data compact">
+        <thead><tr><th>氏名</th><th>関係</th><th>連絡先</th></tr></thead>
+        <tbody>${emergency.map((e) => `<tr><td>${val(e.name)}</td><td>${val(e.relation)}</td><td class="wrap">${val(e.contact)}</td></tr>`).join('')}</tbody>
+      </table></div>` : '<p class="empty">まだ登録がありません。「編集」から3名まで登録できます。</p>'}
       <h3 class="sec">調査情報</h3>
       ${p.investigated ? `<dl class="facts">
         <dt>本当の月収</dt><dd class="truth">${yen(c.income)}</dd>
@@ -1280,7 +1350,152 @@
           <td class="num">${txAmount(t)}</td><td class="num">${num(t.principal)}</td></tr>`).join('')}</tbody>
       </table></div>` : '<p class="empty">取引はまだありません。</p>'}
       <h3 class="sec">メモ <span class="sub" id="memo-state"></span></h3>
-      <textarea id="memo" data-id="${esc(c.id)}" rows="4" placeholder="気づいたことを書いておけます（自動で保存）">${esc(p.memo || '')}</textarea>`;
+      <textarea id="memo" data-id="${esc(c.id)}" rows="4" placeholder="気づいたことを書いておけます（自動で保存）">${esc(p.memo || '')}</textarea>
+      ${c.deleted ? '' : `<p class="actions danger-zone">
+        <button class="ghost danger" data-act="cust-delete" data-id="${esc(c.id)}" ${del.ok ? '' : `disabled title="${esc(del.reason)}"`}>${del.ok && del.keepsRecord ? '台帳から外す' : 'この顧客を削除'}</button>
+        <span class="help">${del.ok ? (del.keepsRecord ? '取引の記録がある客は、台帳から外すだけで記録は残ります。' : 'カルテの内容ごと削除します。') : esc(del.reason)}</span></p>`}`;
+  }
+
+  // ---- 顧客カルテの編集・追加 ----
+
+  function customerForm(id) {
+    const isNew = !id;
+    const c = isNew ? null : G.customerOf(s, id);
+    if (!isNew && !c) return '<p class="empty">見つかりません。</p>';
+    const p = c ? s.people[c.id] : null;
+    const v = (k, def) => (c ? c[k] : def);
+    const F = { ...G.PROFILE, ...G.SECRET };
+    const field = (k, opts = {}) => {
+      const spec = F[k], value = opts.value !== undefined ? opts.value : v(k, opts.def !== undefined ? opts.def : '');
+      const label = opts.label || spec.label;
+      const control = spec.kind === 'select'
+        ? `<select id="cf-${k}" name="${k}">${spec.options.map((o) => `<option value="${esc(o)}" ${o === value ? 'selected' : ''}>${esc(o || '未入力')}</option>`).join('')}</select>`
+        : spec.kind === 'text'
+          ? `<input id="cf-${k}" name="${k}" class="text-input" type="text" maxlength="${spec.max}" value="${esc(value)}" ${opts.list ? `list="${opts.list}"` : ''} ${opts.placeholder ? `placeholder="${esc(opts.placeholder)}"` : ''} ${spec.required ? 'required' : ''}>`
+          : `<span class="unit-input"><input id="cf-${k}" name="${k}" type="number" min="${spec.min}" max="${spec.max}" step="${spec.kind === 'yen' ? 1000 : 1}" value="${esc(value)}"><span>${spec.kind === 'yen' ? '円' : k === 'age' ? '歳' : ''}</span></span>`;
+      return `<div class="field ${opts.wide ? 'wide' : ''} ${opts.dim ? 'dim' : ''}"><label for="cf-${k}">${esc(label)}${spec.required ? ' <span class="bad">*</span>' : ''}</label>${control}${opts.help ? `<p class="help">${opts.help}</p>` : ''}</div>`;
+    };
+    const em = (c ? c.emergency : []).concat([{}, {}, {}]).slice(0, G.EMERGENCY_ROWS);
+    const emRows = em.map((e, i) => `<div class="em-row"><span class="em-no">${i + 1}</span>
+      <input name="em${i}_name" class="text-input" maxlength="40" placeholder="氏名" aria-label="緊急連絡先${i + 1}の氏名" value="${esc(e.name || '')}">
+      <input name="em${i}_relation" class="text-input" maxlength="30" placeholder="関係（例：兄）" aria-label="緊急連絡先${i + 1}の関係" value="${esc(e.relation || '')}">
+      <input name="em${i}_contact" class="text-input" maxlength="60" placeholder="連絡先（携帯番号など）" aria-label="緊急連絡先${i + 1}の連絡先" value="${esc(e.contact || '')}"></div>`).join('');
+    const names = s.customers.filter((x) => !x.deleted && x.id !== id).map((x) => `<option value="${esc(x.name)}">`).join('');
+    const visitDay = c ? (s.visitor === c.id ? s.day : p.nextVisit) : Math.min(s.day + 1, s.days);
+    const secret = `
+      <div class="grid2">
+        ${field('income', { def: 200000 })}${field('realReason')}
+        ${field('weakType', { def: '情', help: '情→泣き落とし、見栄→ご近所にあいさつ、家族→保証人に連絡が効く' })}${field('weak')}
+        ${field('weakLine', { wide: true })}
+        ${field('nige', { def: 3, help: '1〜5（5が逃げやすい）' })}${field('uso', { def: 1, help: '1〜5（5が大ウソつき）' })}
+        ${field('hidden', { def: 'なし' })}${field('hiddenAmount', { def: 0 })}
+        ${field('kuchiguse', { wide: true })}
+      </div>`;
+    return `
+      <header class="drawer-h">
+        <div><span class="no">${isNew ? `顧客の追加 ・ No.${String(s.nextCustomerNo).padStart(3, '0')}` : `顧客カルテの編集 ・ No.${esc(c.id)}`}</span><h2>${isNew ? '新しい顧客' : esc(c.name)}</h2></div>
+        <button class="close" data-act="close-drawer" aria-label="閉じる">×</button>
+      </header>
+      <form id="cust-form" class="cust-form" novalidate>
+        <h3 class="sec">基本情報</h3>
+        <div class="grid2">
+          ${field('name', { placeholder: '例：浪速 太郎' })}${field('kana', { placeholder: '例：なにわ たろう' })}
+          ${field('age', { def: 30 })}${field('job')}
+          ${field('address', { wide: true })}
+          ${field('homeAddress', { wide: true })}
+          ${field('homeContact', { placeholder: '例：06-xxxx-xxxx（母）' })}
+        </div>
+        <h3 class="sec">申告と希望</h3>
+        <div class="grid2">
+          ${field('declaredIncome', { def: 200000 })}${field('want', { value: c ? p.want : 100000 })}
+          ${field('claimReason')}${field('collateral')}
+        </div>
+        <h3 class="sec">勤務先</h3>
+        <div class="grid2">
+          ${field('workName', { label: '勤務先名' })}${field('workPhone', { label: '電話番号' })}
+          ${field('workAddress', { label: '所在地', wide: true })}
+          ${field('workHours', { label: '勤務時間', placeholder: '例：9:00〜18:00' })}${field('workHoliday', { label: '休日', placeholder: '例：土日・祝日' })}
+          ${field('payday', { label: '給料日', placeholder: '例：毎月25日' })}
+        </div>
+        <h3 class="sec">保証人</h3>
+        <div class="grid2">
+          ${field('guarantor', { label: '氏名', help: '空欄なら保証人なし（「保証人に連絡」は使えません）' })}${field('guarantorRelation', { label: '関係', placeholder: '例：母' })}
+          ${field('guarantorContact', { label: '連絡先', placeholder: '携帯番号など', wide: true })}
+          ${c ? `<label class="check wide"><input type="checkbox" name="guarantorGone" ${p.guarantorGone ? 'checked' : ''}> 保証人に連絡がつかない（「保証人に連絡」が使えなくなる）</label>` : ''}
+        </div>
+        <h3 class="sec">緊急連絡先 <span class="sub">3名まで</span></h3>
+        <div class="em-rows">${emRows}</div>
+        <h3 class="sec">流入元</h3>
+        <div class="grid2">
+          ${field('source', { label: 'どこから来たか' })}${field('referrer', { label: '紹介者名', list: 'cf-names', dim: v('source', '') !== '紹介', help: '流入元が「紹介」のとき' })}
+          ${field('sourceNote', { label: '補足', wide: true, placeholder: '例：Xの広告を見て、DMで問い合わせ' })}
+        </div>
+        <datalist id="cf-names">${names}</datalist>
+        <h3 class="sec">来店予定</h3>
+        <div class="grid2">
+          <div class="field"><label for="cf-nextVisit">次の来店予定日</label>
+            <input id="cf-nextVisit" name="nextVisit" class="text-input" type="date" min="${G.isoOf(s.day)}" max="${G.isoOf(s.days)}" value="${visitDay ? G.isoOf(visitDay) : ''}">
+            <p class="help">空欄なら未定。今日にすると、ほかに来店中の客がいなければすぐ来店します。</p></div>
+        </div>
+        <h3 class="sec">ゲームの設定（身辺調査で分かる本当の情報）</h3>
+        ${isNew
+          ? `<label class="check"><input type="checkbox" name="auto" checked> おまかせ（本当の月収・弱み・逃げ足などを自動で決める。身辺調査するまで分からない）</label>
+             <div id="secret-fields" hidden>${secret}</div>`
+          : `<details class="secret-box"><summary>開いて編集する（調査前の答えが見えます）</summary>${secret}</details>`}
+        <div class="actions form-actions">
+          <button type="submit" class="primary">${isNew ? 'この内容で追加する' : '保存する'}</button>
+          <button type="button" class="ghost" data-act="cust-cancel">やめる</button>
+        </div>
+        <p class="error" id="cust-error" role="alert"></p>
+      </form>`;
+  }
+
+  // 入力欄から内容を集めて保存する。まちがいがあれば、入力を残したまま知らせる
+  function saveCustomerForm(formEl) {
+    const fd = new FormData(formEl);
+    const data = {};
+    for (const k of [...Object.keys(G.PROFILE), ...Object.keys(G.SECRET)]) if (fd.has(k)) data[k] = fd.get(k);
+    data.emergency = [];
+    for (let i = 0; i < G.EMERGENCY_ROWS; i++) data.emergency.push({ name: fd.get(`em${i}_name`), relation: fd.get(`em${i}_relation`), contact: fd.get(`em${i}_contact`) });
+    if (formEl.querySelector('[name="guarantorGone"]')) data.guarantorGone = fd.has('guarantorGone');
+    const nv = fd.get('nextVisit');
+    data.nextVisit = nv ? G.dayOfIso(nv) : null;
+    data.auto = fd.has('auto');
+    try {
+      if (ui.drawer.id) G.updateCustomer(s, ui.drawer.id, data);
+      else ui.drawer.id = G.addCustomer(s, data).id;
+    } catch (e) {
+      if (!(e instanceof G.GameError)) throw e;
+      $('#cust-error').textContent = e.message;
+      toast(e.message);
+      return;
+    }
+    toast(`${G.customerOf(s, ui.drawer.id).name}のカルテを保存しました`);
+    ui.drawer = { kind: 'customer', id: ui.drawer.id };
+    save();
+    render();
+    renderDrawer(true);
+  }
+
+  // ---- 最初から（顧客台帳を引き継ぐか選ぶ） ----
+
+  function renderReset() {
+    const box = $('#reset');
+    if (!ui.reset || !s) { box.hidden = true; return; }
+    const roster = G.rosterOf(s);
+    $('#reset-body').innerHTML = `
+      <h2>最初から</h2>
+      <p>1日目からやり直します。今の進み具合（貸付・取引・業務日誌・損益）は消えます。顧客台帳はどうしますか？</p>
+      <div class="choice">
+        <button class="primary" data-act="reset-roster">今の顧客台帳で最初から</button>
+        <span class="help">編集・追加した客をそのまま使います（${roster.length}名。台帳から外した客は除く）</span>
+      </div>
+      <div class="choice">
+        <button class="ghost" data-act="reset-csv">customers.csv から読み直す</button>
+        <span class="help">台帳ファイルの客に戻します。編集・追加した内容は消えます</span>
+      </div>
+      <p class="actions"><button class="ghost" data-act="reset-close">やめる</button></p>`;
+    box.hidden = false;
   }
 
   function loanCard(id) {

@@ -37,6 +37,10 @@
 //
 // 早送り
 //   予定（来店・期日・締め・延滞）のない日を続けて終え、次に予定がある日で止める。
+//
+// 顧客カルテ
+//   基本情報・勤務先・保証人・緊急連絡先（3名）・流入元などを自由に書き換えられる。顧客の追加と削除もできる。
+//   貸付が残っている客は削除できない。取引の記録がある客は、削除すると台帳から外すだけで記録は残す。
 (function (root) {
   'use strict';
 
@@ -333,20 +337,131 @@
       }
       // ウソつきほど月収を盛って申告する
       c.declaredIncome = floorTo(c.income * (1 + (c.uso - 1) * 0.25), 1000);
-      return c;
+      return normalizeCustomer(c);
     });
+  }
+
+  // ---- 顧客カルテ（編集できる項目） ----
+
+  const SOURCES = ['X', 'DM', 'テレアポ', '紹介', 'チラシ', '飛び込み', 'ネット検索', 'その他'];   // 流入元
+  const WEAK_TYPES = ['情', '見栄', '家族'];
+  const EMERGENCY_ROWS = 3;   // 緊急連絡先の人数
+  const txt = (label, max, required) => ({ label, kind: 'text', max, required: !!required });
+  const num = (label, kind, min, max) => ({ label, kind, min, max });
+  // 表の情報（申告・連絡先など）。kind: text（文字）/ yen（円）/ int（整数）/ select
+  const PROFILE = {
+    name: txt('氏名', 30, true), kana: txt('ふりがな', 40), age: num('年齢', 'int', 18, 120), job: txt('職業', 40),
+    address: txt('現住所', 120), homeAddress: txt('実家の住所', 120), homeContact: txt('実家の連絡先', 60),
+    declaredIncome: num('月収（申告）', 'yen', 0, 100000000), want: num('希望額', 'yen', 10000, 100000000),
+    claimReason: txt('申告した理由', 60), collateral: txt('担保', 60),
+    workName: txt('勤務先名', 60), workPhone: txt('勤務先の電話番号', 40), workAddress: txt('勤務先の所在地', 120),
+    workHours: txt('勤務時間', 40), workHoliday: txt('休日', 40), payday: txt('給料日', 40),
+    guarantor: txt('保証人の氏名', 40), guarantorRelation: txt('保証人の関係', 30), guarantorContact: txt('保証人の連絡先', 60),
+    source: { label: '流入元', kind: 'select', options: ['', ...SOURCES] }, referrer: txt('紹介者名', 40), sourceNote: txt('流入元の補足', 80),
+  };
+  const EMERGENCY = { name: txt('緊急連絡先の氏名', 40), relation: txt('緊急連絡先の関係', 30), contact: txt('緊急連絡先の連絡先', 60) };
+  // ゲームの設定（身辺調査で分かる本当の情報）
+  const SECRET = {
+    income: num('本当の月収', 'yen', 0, 100000000), realReason: txt('本当の理由', 60),
+    weakType: { label: '弱みタイプ', kind: 'select', options: WEAK_TYPES }, weak: txt('弱み', 60), weakLine: txt('弱みを突かれた時の台詞', 120),
+    nige: num('逃げ足', 'int', 1, 5), uso: num('ウソつき度', 'int', 1, 5),
+    hidden: txt('隠し資産', 60), hiddenAmount: num('隠し資産額', 'yen', 0, 100000000), kuchiguse: txt('口癖', 60),
+  };
+
+  // 前の版のデータや台帳CSVの客に、新しい項目をそろえる（保証人「なし」は空欄にする）
+  function normalizeCustomer(c) {
+    if (c.guarantor === 'なし') c.guarantor = '';
+    for (const [k, spec] of Object.entries(PROFILE)) {
+      if (c[k] === undefined) c[k] = spec.kind === 'text' || spec.kind === 'select' ? '' : 0;
+    }
+    if (!Array.isArray(c.emergency)) c.emergency = [];
+    while (c.emergency.length < EMERGENCY_ROWS) c.emergency.push({ name: '', relation: '', contact: '' });
+    if (c.deleted === undefined) c.deleted = false;
+    return c;
+  }
+
+  function readField(spec, raw) {
+    if (spec.kind === 'text') {
+      const v = String(raw == null ? '' : raw).trim();
+      if (spec.required && !v) throw new GameError(`${spec.label}を入れてください`);
+      if (v.length > spec.max) throw new GameError(`${spec.label}は${spec.max}文字までです`);
+      return v;
+    }
+    if (spec.kind === 'select') {
+      const v = String(raw == null ? '' : raw);
+      if (!spec.options.includes(v)) throw new GameError(`${spec.label}を選んでください`);
+      return v;
+    }
+    const t = String(raw == null ? '' : raw).normalize('NFKC').replace(/[,円\s]/g, '');
+    const n = Number(t);
+    const show = (x) => (spec.kind === 'yen' ? yen(x) : x);
+    if (t === '' || !Number.isInteger(n) || n < spec.min || n > spec.max) {
+      throw new GameError(`${spec.label}は${show(spec.min)}〜${show(spec.max)}の整数で入れてください`);
+    }
+    return n;
+  }
+
+  // 入力を確かめて、カルテの中身にまとめる。withSecret なら本当の情報（ゲームの設定）も読む
+  function readCustomer(data, withSecret) {
+    const out = {};
+    for (const [k, spec] of Object.entries(PROFILE)) out[k] = readField(spec, data[k]);
+    out.emergency = [];
+    for (let i = 0; i < EMERGENCY_ROWS; i++) {
+      const row = (data.emergency && data.emergency[i]) || {};
+      out.emergency.push({ name: readField(EMERGENCY.name, row.name), relation: readField(EMERGENCY.relation, row.relation), contact: readField(EMERGENCY.contact, row.contact) });
+    }
+    if (withSecret) for (const [k, spec] of Object.entries(SECRET)) out[k] = readField(spec, data[k]);
+    return out;
+  }
+
+  // 流入元の表記：紹介（紹介者：○○）・補足
+  function sourceText(c) {
+    if (!c.source) return '';
+    const who = c.source === '紹介' && c.referrer ? `（紹介者：${c.referrer}）` : '';
+    return `${c.source}${who}${c.sourceNote ? `・${c.sourceNote}` : ''}`;
+  }
+
+  // 追加した客の本当の情報を「おまかせ」で決める（身辺調査するまで分からない）
+  const AUTO = {
+    reasons: ['パチンコの負けの穴埋め', 'ほかの金融への返済', '推し活の遠征費', '彼女へのプレゼント', '申告どおり（めずらしく本当）', '自己啓発セミナーの受講料'],
+    weak: {
+      情: ['実家の母の話をされると泣く', '飼い猫の写真を見せられると弱い'],
+      見栄: ['会社に借金がバレること', 'SNSのフォロワーに知られること'],
+      家族: ['妻に内緒で借りている', '子どもの運動会が近い'],
+    },
+    line: {
+      情: '…それを言われたら、返すしかないやないですか…',
+      見栄: 'ちょっ、声大きいです！ 職場の人に聞こえる！',
+      家族: '家族にだけは言わんといてください！',
+    },
+    hidden: ['へそくり', '使っていない金のネックレス', '解約していない積立保険', '押し入れのレトロゲーム'],
+    kuchiguse: ['なんとかなるっしょ', '来月には入るんで', 'ほんま助かります', '一時的なもんなんで'],
+  };
+  function randomSecret(s, v) {
+    const ratio = 0.5 + 0.5 * rand(s);   // 本当の月収は申告の5〜10割
+    const weakType = pick(s, WEAK_TYPES);
+    const hasHidden = rand(s) < 0.5;
+    return {
+      income: floorTo(v.declaredIncome * ratio, 1000),
+      uso: Math.min(5, Math.max(1, 1 + Math.round((1 / ratio - 1) / 0.25))),
+      realReason: pick(s, AUTO.reasons), weakType, weak: pick(s, AUTO.weak[weakType]), weakLine: AUTO.line[weakType],
+      nige: 1 + Math.floor(rand(s) * 5),
+      hidden: hasHidden ? pick(s, AUTO.hidden) : 'なし', hiddenAmount: hasHidden ? (5 + Math.floor(rand(s) * 26)) * 10000 : 0,
+      kuchiguse: pick(s, AUTO.kuchiguse),
+    };
   }
 
   // ---- 状態 ----
 
   function newGame(customers, seed) {
     const s = {
-      v: 7, day: 0, days: CONFIG.days, goal: goalFor(CONFIG.days),
+      v: 8, day: 0, days: CONFIG.days, goal: goalFor(CONFIG.days),
       cash: CONFIG.startCash, sugomi: 1, police: 0, seed: seed >>> 0, unknowns: [], nextUnknownId: 1,
       costs: [], closings: [],
       customers, people: {}, loans: [], txs: [], visitor: null, nightUsed: false, log: [], over: null,
-      nextLoanId: 1, nextTxId: 1,
+      nextLoanId: 1, nextTxId: 1, nextCustomerNo: 1 + Math.max(0, ...customers.map((c) => Number(c.id) || 0)),
     };
+    customers.forEach(normalizeCustomer);
     const days = customers.map((_, i) => CONFIG.arrivalDays[i] || 10 + 2 * (i - CONFIG.arrivalDays.length));
     for (let i = days.length - 1; i > 0; i--) {
       const j = Math.floor(rand(s) * (i + 1));
@@ -370,7 +485,7 @@
   const lateDaysOf = (s, loan, day) => (loan.lateSince == null ? 0 : (day || s.day) - loan.lateSince); // 期日から何日遅れているか
   // 夜逃げした貸付を不渡りに計上する締め日（期日から2週間を過ぎた最初の締め）
   const fuwatariDayOf = (s, loan) => nextClosingDay(Math.max(s.day, loan.lateSince + CONFIG.fuwatariDays));
-  const hasGuarantor = (s, c) => c.guarantor !== 'なし' && !s.people[c.id].guarantorGone;
+  const hasGuarantor = (s, c) => !!c.guarantor && c.guarantor !== 'なし' && !s.people[c.id].guarantorGone;
   const log = (s, kind, text) => s.log.push({ day: s.day, kind, text });
   const owedOf = (loan) => loan.principal + loan.accrued;
   const nextJumpOf = (loan) => jumpOf(loan);
@@ -465,16 +580,19 @@
       }
     }
     unknownEvents(s);
-    const waiting = s.customers.filter((c) => !s.people[c.id].refused && s.people[c.id].nextVisit === s.day);
+    const waiting = s.customers.filter((c) => !c.deleted && !s.people[c.id].refused && s.people[c.id].nextVisit === s.day);
     waiting.slice(1).forEach((c) => s.people[c.id].nextVisit++);
-    if (waiting.length) {
-      const c = waiting[0], p = s.people[c.id];
-      p.nextVisit = null;
-      p.visits++;
-      s.visitor = c.id;
-      const again = p.visits > 1 ? 'また' : '';
-      log(s, 'visit', `${c.name}が${again}来店。「${c.claimReason}で、${yen(p.want)}貸してください…」`);
-    }
+    if (waiting.length) arrive(s, waiting[0]);
+  }
+
+  function arrive(s, c) {
+    const p = s.people[c.id];
+    p.nextVisit = null;
+    p.refused = false;
+    p.visits++;
+    s.visitor = c.id;
+    const again = p.visits > 1 ? 'また' : '';
+    log(s, 'visit', `${c.name}が${again}来店。「${c.claimReason || 'ちょっと物入りで'}で、${yen(p.want)}貸してください…」`);
   }
 
   // 不明入金：誰からかわからない入金が入る。数日後、持ち主から電話があって判明する。
@@ -484,7 +602,7 @@
     for (const u of s.unknowns) {
       if (u.revealed || u.revealDay !== s.day || unknownLeft(u) <= 0) continue;
       u.revealed = true;
-      const c = customerOf(s, u.ownerId);
+      const c = customerOf(s, u.ownerId) || { name: '持ち主' };
       log(s, 'visit', `${c.name}から電話。「${fmtDay(u.day)}に${yen(u.amount)}多めに入れといたで。ちゃんと引いといてや」——不明入金の持ち主がわかった。元金表かカレンダーから充当できる。`);
     }
     const active = s.loans.filter(isActive);
@@ -773,6 +891,114 @@
     s.people[customerId].memo = String(text).slice(0, 2000);
   }
 
+  // ---- 顧客カルテの編集・追加・削除 ----
+
+  // 来店予定日を入れられるか（day = null は未定）
+  function checkVisit(s, c, day) {
+    if (day === null) return;
+    if (!(Number.isInteger(day) && day >= s.day && day <= s.days)) {
+      throw new GameError(`来店予定日は${fmtDay(s.day)}（今日）〜${fmtDay(s.days)}（最終日）の間で選んでください`);
+    }
+    if (c.deleted) throw new GameError('台帳から外した客は来店しません。先に元に戻してください');
+    if (day === s.day && s.visitor !== c.id) {
+      if (s.over) throw new GameError('勝負はもう終わっています');
+      if (s.visitor) throw new GameError('今日はほかの客の受付中です。来店予定は明日以降にしてください');
+    }
+  }
+
+  // 次の来店予定を決める。今日にすると（ほかに来店中の客がいなければ）すぐ来店する
+  function setVisit(s, c, day) {
+    checkVisit(s, c, day);
+    const p = s.people[c.id];
+    if (day === null) p.nextVisit = null;
+    else if (day === s.day) { if (s.visitor !== c.id) arrive(s, c); }
+    else {
+      p.nextVisit = day;
+      p.refused = false;   // 断った客でも、来店予定を入れれば来る
+    }
+  }
+
+  // カルテを書き換える。data は PROFILE・SECRET の各項目、emergency（3名分）、guarantorGone、nextVisit（日 / null / 省略で変えない）
+  function updateCustomer(s, id, data) {
+    const c = customerOf(s, id);
+    if (!c) throw new GameError('その客は台帳にいません');
+    const v = readCustomer(data, true);
+    const p = s.people[id];
+    const visitChanged = data.nextVisit !== undefined && data.nextVisit !== p.nextVisit;
+    if (visitChanged) checkVisit(s, c, data.nextVisit);   // まちがいがあれば、何も書き換えずに止める
+    Object.assign(c, v);
+    p.want = v.want;
+    if (typeof data.guarantorGone === 'boolean') p.guarantorGone = data.guarantorGone;
+    log(s, 'info', `${c.name}（No.${c.id}）の顧客カルテを更新した。`);
+    if (visitChanged) setVisit(s, c, data.nextVisit);
+    return c;
+  }
+
+  // 顧客を追加する。data.auto が true なら本当の情報（ゲームの設定）はおまかせ。来店予定の初期値は明日
+  function addCustomer(s, data) {
+    const v = readCustomer(data, !data.auto);
+    if (data.auto) Object.assign(v, randomSecret(s, v));
+    const id = String(s.nextCustomerNo).padStart(3, '0');
+    const c = normalizeCustomer({ id, ...v });
+    const visit = data.nextVisit === undefined ? Math.min(s.day + 1, s.days) : data.nextVisit;
+    if (!s.over) checkVisit(s, c, visit);
+    s.nextCustomerNo++;
+    s.customers.push(c);
+    s.people[id] = {
+      nextVisit: null, want: c.want, investigated: false, hiddenUsed: false,
+      guarantorGone: false, refused: false, visits: 0, memo: '',
+    };
+    log(s, 'info', `顧客台帳に${c.name}（No.${id}）を追加した。${c.source ? `流入元：${sourceText(c)}。` : ''}`);
+    if (!s.over) setVisit(s, c, visit);
+    return c;
+  }
+
+  // 削除できるか。貸付が残っている客と来店中の客は削除できない
+  function canDeleteCustomer(s, id) {
+    const c = customerOf(s, id);
+    if (!c) return { ok: false, reason: 'その客は台帳にいません' };
+    if (c.deleted) return { ok: false, reason: 'もう台帳から外してあります' };
+    if (s.visitor === id) return { ok: false, reason: '来店中の客は削除できません。先に貸すか断ってください' };
+    const loans = s.loans.filter((l) => l.customerId === id);
+    if (loans.some(onBooks)) return { ok: false, reason: '貸付が残っているので削除できません（完済か不渡りのあとに削除できます）' };
+    return { ok: true, reason: '', keepsRecord: loans.length > 0 };
+  }
+
+  // 削除する。取引の記録がない客は台帳から消し、記録がある客は台帳から外すだけにする（元金表や履歴の数字を残すため）
+  function deleteCustomer(s, id) {
+    const check = canDeleteCustomer(s, id);
+    if (!check.ok) throw new GameError(check.reason);
+    const c = customerOf(s, id);
+    if (!check.keepsRecord) {
+      s.customers = s.customers.filter((x) => x.id !== id);
+      delete s.people[id];
+      log(s, 'info', `顧客台帳から${c.name}（No.${id}）を削除した。`);
+      return 'removed';
+    }
+    c.deleted = true;
+    s.people[id].nextVisit = null;
+    log(s, 'info', `${c.name}（No.${id}）を顧客台帳から外した（取引の記録は残す）。`);
+    return 'archived';
+  }
+
+  function restoreCustomer(s, id) {
+    const c = customerOf(s, id);
+    if (!c || !c.deleted) throw new GameError('元に戻せる客ではありません');
+    c.deleted = false;
+    log(s, 'info', `${c.name}（No.${id}）を顧客台帳に戻した。`);
+  }
+
+  // 「最初から」で引き継ぐ顧客台帳（台帳から外した客は除く）
+  const rosterOf = (s) => JSON.parse(JSON.stringify(s.customers.filter((c) => !c.deleted)));
+
+  // 前の版の保存データを今の形にそろえる
+  function migrate(s) {
+    s.customers.forEach(normalizeCustomer);
+    if (s.nextCustomerNo == null) s.nextCustomerNo = 1 + Math.max(0, ...s.customers.map((c) => Number(c.id) || 0));
+    s.v = 8;
+    return s;
+  }
+
   function nigeChance(s, loan) {
     const c = customerOf(s, loan.customerId);
     const p = CONFIG.nigePerFoot * c.nige + CONFIG.nigePerDay * loan.overdueDays
@@ -1001,6 +1227,7 @@
       let status = loan ? loan.status : 'まだ来ていない';
       if (s.visitor === c.id) status = '来店中';
       else if (p.refused && !loan) status = '断った';
+      if (c.deleted) status = '削除済み';
       const active = loans.filter(isActive);
       const dues = active.filter((l) => l.status === '返済中').map((l) => l.due);
       return {
@@ -1021,6 +1248,8 @@
   const api = {
     CONFIG, PRESETS, COMMANDS, TX, GameError, parseCSV, loadCustomers, newGame,
     investigate, lend, lendLimit, quote, refuse, collect, setMemo, endDay, skipToNext, agendaOf,
+    PROFILE, SECRET, EMERGENCY_ROWS, SOURCES, WEAK_TYPES, sourceText, updateCustomer, addCustomer,
+    canDeleteCustomer, deleteCustomer, restoreCustomer, rosterOf, migrate,
     COSTS, pl, fuwatariPlan, closingOf, nextClosingDay, lateDaysOf, fuwatariDayOf, onBooks,
     totals, schedule, ledger, nigeChance, capRange, owedOf, nextJumpOf, isActive,
     visitorOf, customerOf, loanOf, hasGuarantor,

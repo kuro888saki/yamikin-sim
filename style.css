@@ -326,6 +326,26 @@ b.unk { color: #5b2d91; }
 .data td.wrap { white-space: normal; min-width: 160px; }
 .breakdown.pl small { font-size: 12px; color: var(--muted); margin-left: 2px; }
 .top-actions { display: flex; gap: 8px; }
+
+/* ---- 顧客カルテの編集 ---- */
+.cust-form .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+.cust-form .field.wide, .cust-form .check.wide { grid-column: 1 / -1; }
+.cust-form .field.dim { opacity: .55; }
+.cust-form select { width: 100%; }
+.cust-form .unit-input input { width: 140px; }
+.em-rows { display: grid; gap: 6px; }
+.em-row { display: grid; grid-template-columns: 18px minmax(0, 1.1fr) minmax(0, .8fr) minmax(0, 1.4fr); gap: 6px; align-items: center; }
+.em-no { font-size: 12px; color: var(--muted); text-align: center; }
+.check { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.check input { margin-top: 3px; }
+.secret-box summary { cursor: pointer; color: var(--blue); font-size: 13px; margin-bottom: 8px; }
+.form-actions { margin-top: 18px; position: sticky; bottom: 0; background: var(--panel); padding: 10px 0; border-top: 1px solid var(--line); }
+.ghost.danger { color: var(--red); border-color: var(--red); }
+.danger-zone { margin-top: 18px; padding-top: 12px; border-top: 1px dashed var(--line); align-items: center; }
+.drawer-h .ghost.small { flex: none; }
+.primary.small { padding: 4px 12px; font-size: 13px; }
+.choice { display: grid; gap: 4px; margin: 10px 0; }
+.choice button { justify-self: start; }
 .kpis dd.neg { color: #ff8a7a; }
 .summary dd.in { color: var(--green); }
 
@@ -413,6 +433,9 @@ b.unk { color: #5b2d91; }
   .panel { padding: 12px 14px; }
   .stat-row, .stat-row.three, .stat-row.four, .stat-row.six, .stat-row.eight { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .field.two { grid-template-columns: 1fr; }
+  .cust-form .grid2 { grid-template-columns: 1fr; }
+  .em-row { grid-template-columns: 18px minmax(0, 1fr); }
+  .em-row input:not(:first-of-type) { grid-column: 2; }
   .cmds { grid-template-columns: 1fr; }
   .cal-grid { gap: 2px; }
   .cal-cell { min-height: 50px; padding: 3px; align-items: center; }
