@@ -358,6 +358,7 @@ b.unk { color: #5b2d91; }
 }
 .bar .hint { font-size: 13px; color: var(--muted); }
 .bar .primary { padding: 10px 26px; font-size: 15px; }
+.bar .ghost { padding: 9px 18px; font-size: 14px; font-weight: 600; }
 
 /* ---- 結果・読み込み ---- */
 .overlay {
@@ -421,5 +422,8 @@ b.unk { color: #5b2d91; }
   .cal-top { justify-content: center; }
   .bar { padding: 8px 16px; }
   .bar .hint { flex: 1; font-size: 12px; }
+  .bar { gap: 8px; }
+  .bar .primary { padding: 10px 14px; font-size: 14px; }
+  .bar .ghost { padding: 9px 10px; font-size: 13px; }
   .drawer { padding: 0 16px 24px; }
 }

@@ -18,6 +18,7 @@
     loans: { status: 'すべて', sort: 'id' },
     resultClosed: false,        // 結果を閉じて帳簿を見返しているとき
     period: null,               // 期間・目標の画面 { end, goal }
+    skip: null,                 // 直前の早送り { from, to, days, agenda }
   };
   // 受付の入力欄 ①notation ②cycle ③firstDue ④transfer ⑤account。初回と振込金額は、手で変えるまで①②に合わせて動かす
   let form = { visitor: null };
@@ -191,7 +192,12 @@
     else if (a === 'period-std') { ui.period.goal = G.goalFor(ui.period.end); renderPeriod(); }
     else if (a === 'end') {
       if (s.over) { ui.resultClosed = false; renderResult(); return; }
-      act(() => { const before = s.log.length; G.endDay(s); mark = before; ui.calDay = null; ui.calMonth = G.monthOffsetOfDay(s.day); });
+      act(() => { const before = s.log.length; G.endDay(s); mark = before; ui.skip = null; ui.calDay = null; ui.calMonth = G.monthOffsetOfDay(s.day); });
+      if (!s.over) window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else if (a === 'skip') {
+      let r = null;
+      act(() => { const before = s.log.length; r = G.skipToNext(s); mark = before; ui.skip = r; ui.calDay = null; ui.calMonth = G.monthOffsetOfDay(s.day); });
+      if (r) toast(s.over ? `${r.days}日進めて、勝負の結果が出ました` : `${r.days}日進めて${G.fmtDay(r.to)}へ（${r.agenda.join('・')}）`);
       if (!s.over) window.scrollTo({ top: 0, behavior: 'smooth' });
     } else if (a === 'open-customer') { ui.drawer = { kind: 'customer', id: el.dataset.id }; renderDrawer(true); }
     else if (a === 'open-loan') { ui.drawer = { kind: 'loan', id: Number(el.dataset.id) }; renderDrawer(true); }
@@ -354,10 +360,13 @@
     const btn = $('#end');
     const overdue = s.loans.some((l) => l.status === '延滞');
     btn.disabled = !!s.visitor;
+    const skip = $('#skip');
+    skip.disabled = !!s.visitor || !!s.over || s.day >= s.days;
+    skip.title = overdue ? '延滞客がいる間は、早送りしても1日ずつ進みます' : '予定（来店・期日・締め・延滞）のない日を飛ばして、次に予定がある日まで進めます';
     btn.textContent = s.over ? '結果をもう一度見る' : s.day >= s.days ? '勝負の結果を見る ▶' : '1日を終える ▶';
     let hint = `${G.fmtDayLong(s.day)}`;
     if (s.visitor) hint = '来店した客に、貸すか断るかを決めてください（本日の業務）';
-    else if (overdue && !s.nightUsed) hint = '延滞客がいます。取り立てずに終えることもできます';
+    else if (overdue && !s.nightUsed) hint = '延滞客がいます。取り立てずに終えることもできます（延滞客がいる間は、早送りも1日ずつ）';
     if (!s.visitor && !s.over && G.closingOf(s.day)) hint = `今日は${G.closingOf(s.day)}の締め日。1日を終えると、期日から2週間以上遅れて連絡がつかない客を不渡りにします`;
     $('#hint').textContent = hint;
   }
@@ -375,6 +384,16 @@
     const history = s.log.slice(0, mark).reverse();
     const logItems = (list, withDay) => list.map((e) =>
       `<li class="${e.kind}">${withDay ? `<span class="day">${G.fmtDay(e.day)}</span>` : ''}${esc(e.text)}</li>`).join('');
+    // 早送りしたときは、飛ばした日の出来事も日付つきで並べ、その間の入金をまとめて見せる
+    const skipped = ui.skip && ui.skip.to === s.day && ui.skip.days > 1 ? ui.skip : null;
+    const multiDay = !!skipped || new Set(today.map((e) => e.day)).size > 1;
+    const journalSub = s.day === 1 ? '開店初日' : skipped ? `早送り：${G.fmtDay(skipped.from)}の夜〜${G.fmtDay(s.day)}（${skipped.days}日分）` : multiDay ? '前回からの出来事' : '昨夜から今日まで';
+    let skipNote = '';
+    if (skipped) {
+      const span = s.txs.filter((t) => t.day > skipped.from && t.day <= s.day && txSign(t) > 0);
+      const unk = sum(s.unknowns.filter((u) => u.day > skipped.from && u.day <= s.day), (u) => u.amount);
+      skipNote = `<p class="help lead">早送りした${skipped.days}日の入金は計${yen(sum(span, (t) => t.amount) + unk)}（ジャンプ金 ${num(sum(span, (t) => t.toInterest))}・元金 ${num(sum(span, (t) => t.toPrincipal))}${unk ? `・不明入金 ${num(unk)}` : ''}）。止まった理由：${esc(skipped.agenda.join('・'))}</p>`;
+    }
     return `
       <div class="stat-row">
         <div class="stat"><span>本日の入金</span><b class="in">${yen(inflow)}</b>
@@ -399,8 +418,9 @@
         </div>
         <div class="col">
           <section class="panel">
-            <header class="panel-h"><h2>業務日誌</h2><span class="sub">${s.day === 1 ? '開店初日' : '昨夜から今日まで'}</span></header>
-            <ul class="log">${today.length ? logItems(today, false) : '<li class="info">静かな一日。何も起きていない。</li>'}</ul>
+            <header class="panel-h"><h2>業務日誌</h2><span class="sub">${journalSub}</span></header>
+            ${skipNote}
+            <ul class="log">${today.length ? logItems(today, multiDay) : '<li class="info">静かな一日。何も起きていない。</li>'}</ul>
             <details class="history"><summary>これまでの日誌（${history.length}件）</summary>
               <ul class="log small">${logItems(history, true) || '<li class="info">まだ記録はありません。</li>'}</ul></details>
           </section>

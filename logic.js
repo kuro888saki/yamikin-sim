@@ -34,6 +34,9 @@
 //
 // 期間
 //   既定は1年（11/1〜翌年10/31）。最終日は締め日（15日か月末）にして、途中でも自由に延ばせる。
+//
+// 早送り
+//   予定（来店・期日・締め・延滞）のない日を続けて終え、次に予定がある日で止める。
 (function (root) {
   'use strict';
 
@@ -810,6 +813,27 @@
     else startDay(s);
   }
 
+  // 今日の予定（早送りが止まる理由）：来店・期日（入金や延滞の結果が出た日）・締め日・延滞中の客
+  const DUE_TX = ['accrue', 'lateAccrue', 'jump', 'jumpPlus', 'payoff', 'partial', 'overdue'];
+  function agendaOf(s) {
+    const list = [];
+    if (s.visitor) list.push('来店');
+    if (s.txs.some((t) => t.day === s.day && DUE_TX.includes(t.type))) list.push('期日');
+    if (closingOf(s.day)) list.push('締め');
+    if (s.loans.some((l) => l.status === '延滞')) list.push('延滞');
+    return list;
+  }
+
+  // 早送り：予定のない日は続けて終えて、次に予定がある日で止まる（延滞客がいる間は毎日止まる）。
+  // 締めは15日と月末に必ずあるので、長くても半月ほどで止まる。
+  function skipToNext(s) {
+    if (s.over) throw new GameError('勝負はもう終わっています');
+    if (s.visitor) throw new GameError('来店した客への返事がまだです');
+    const from = s.day;
+    do endDay(s); while (!s.over && !agendaOf(s).length);
+    return { from, to: s.day, days: s.day - from, agenda: s.over ? [] : agendaOf(s) };
+  }
+
   // 期間の標準の目標（1日あたりの目安 × 日数、10万円単位）
   const goalFor = (days) => Math.max(100000, Math.round((CONFIG.goalPerDay * days) / 100000) * 100000);
 
@@ -996,7 +1020,7 @@
 
   const api = {
     CONFIG, PRESETS, COMMANDS, TX, GameError, parseCSV, loadCustomers, newGame,
-    investigate, lend, lendLimit, quote, refuse, collect, setMemo, endDay,
+    investigate, lend, lendLimit, quote, refuse, collect, setMemo, endDay, skipToNext, agendaOf,
     COSTS, pl, fuwatariPlan, closingOf, nextClosingDay, lateDaysOf, fuwatariDayOf, onBooks,
     totals, schedule, ledger, nigeChance, capRange, owedOf, nextJumpOf, isActive,
     visitorOf, customerOf, loanOf, hasGuarantor,
