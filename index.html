@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>どてらい金融 顧客管理システム</title>
-  <link rel="stylesheet" href="style.css?v=11">
+  <link rel="stylesheet" href="style.css?v=12">
 </head>
 <body>
   <header class="top">
@@ -14,6 +14,7 @@
     </div>
     <dl class="kpis" id="kpis"></dl>
     <div class="top-actions">
+      <button class="ghost on-dark" data-act="shop-edit" title="手持ち資金・凄み・警察の目を直す">店の数字</button>
       <button class="ghost on-dark" data-act="period-open" title="期間（最終日）と目標の純利を変える">期間・目標</button>
       <button class="ghost on-dark" data-act="reset" title="台帳を読み直して1日目からやり直す">最初から</button>
     </div>
@@ -48,6 +49,10 @@
     <div class="sheet" id="reset-body" role="dialog" aria-modal="true" aria-label="最初から"></div>
   </div>
 
+  <div class="overlay" id="editor" hidden>
+    <div class="sheet" id="editor-body" role="dialog" aria-modal="true" aria-label="直す"></div>
+  </div>
+
   <div class="overlay" id="import" hidden>
     <div class="sheet" id="import-body" role="dialog" aria-modal="true" aria-label="CSVから読み込む"></div>
   </div>
@@ -66,7 +71,7 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="logic.js?v=11"></script>
-  <script src="ui.js?v=11"></script>
+  <script src="logic.js?v=12"></script>
+  <script src="ui.js?v=12"></script>
 </body>
 </html>

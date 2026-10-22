@@ -50,7 +50,8 @@
     maxDays: 365 * 5,         // 延ばせる上限
     startDate: '2026-11-01',  // 1日目の日付
     startCash: 1000000,
-    goalPerDay: 13700,        // 標準の目標の純利 = 1日あたり13,700円 × 日数（1年で500万円、45日で60万円）
+    // 標準の目標の純利（期間の日数 → 純利）。客55人を丁寧に貸したときの自動プレイで、7割ほど勝てる額。間はならして決める
+    goalPoints: [[45, 1000000], [90, 5000000], [182, 25000000], [365, 100000000]],
     minCycle: 1,              // S の範囲
     maxCycle: 30,
     minRate: 10,              // 1Sあたりの利息の範囲（千分率。10 = 元金の1%、1000 = 100%）
@@ -61,6 +62,7 @@
     payUnit: 1000,            // 客は1,000円単位で入金してくる
     investigateCost: 30000,
     arrivalDays: [1, 2, 4, 6, 9],
+    arrivalSpread: 0.7,       // 6人目以降が初めて来るのは、期間のこの割合のところまで
     revisitDelay: 3,          // 完済した客が次に来るまでの日数
     revisitScale: 1.2,        // 再来店時の希望額の倍率（味をしめる）
     capRatio: 1.0,            // 10S分でかき集められる額 = 月収×1.0（±20%）。S に比例
@@ -145,6 +147,8 @@
     windfall: { label: '大当たりの返済', cash: 1, pay: true },
     allocate: { label: '不明入金の充当', cash: 0, pay: true },   // お金は不明入金のときに受け取り済み
     allocCancel: { label: '充当の取消', cash: 0, pay: true },     // 金額はマイナスで記録する
+    manual: { label: '入金（手入力）', cash: 1, pay: true },     // 入金台帳から手で記録した入金
+    adjust: { label: '修正', cash: 0 },                          // 元金残高・未払いジャンプ金を手で直した記録（dPrincipal・dAccrued）
     overdue: { label: '延滞発生', cash: 0 },
     flee: { label: '夜逃げ（連絡不通）', cash: 0 },
     fuwatari: { label: '不渡り', cash: 0 },                     // 締めで元金を貸付総元金から引いた記録
@@ -430,6 +434,10 @@
     }
     const t = String(raw == null ? '' : raw).normalize('NFKC').replace(/[,円\s]/g, '');
     const n = Number(t);
+    if (spec.kind === 'day') {   // ゲーム内の日（画面では日付で選ぶ）
+      if (t === '' || !Number.isInteger(n) || n < spec.min || n > spec.max) throw new GameError(`${spec.label}は${fmtDay(spec.min)}〜${fmtDay(spec.max)}の間で選んでください`);
+      return n;
+    }
     const show = (x) => (spec.kind === 'yen' ? yen(x) : x);
     if (t === '' || !Number.isInteger(n) || n < spec.min || n > spec.max) {
       throw new GameError(`${spec.label}は${show(spec.min)}〜${show(spec.max)}の整数で入れてください`);
@@ -496,9 +504,13 @@
       costs: [], closings: [],
       customers, people: {}, loans: [], txs: [], visitor: null, nightUsed: false, log: [], over: null,
       nextLoanId: 1, nextTxId: 1, nextCustomerNo: 1 + Math.max(0, ...customers.map((c) => Number(c.id) || 0)),
+      edits: [], adjust: { cash: 0, principal: 0 },   // 手で直した記録と、帳簿の差額（手持ち資金・元金残高）
     };
     customers.forEach(normalizeCustomer);
-    const days = customers.map((_, i) => CONFIG.arrivalDays[i] || 10 + 2 * (i - CONFIG.arrivalDays.length));
+    // 初めて来る日：最初の5人は決まった日、6人目からは10日目〜期間の7割のところまでに散らばる（来る順はシャッフル）
+    const first = CONFIG.arrivalDays.length, rest = customers.length - first;
+    const lastArrival = Math.max(12, Math.round(s.days * CONFIG.arrivalSpread));
+    const days = customers.map((_, i) => (i < first ? CONFIG.arrivalDays[i] : Math.round(10 + ((i - first) * (lastArrival - 10)) / Math.max(1, rest))));
     for (let i = days.length - 1; i > 0; i--) {
       const j = Math.floor(rand(s) * (i + 1));
       [days[i], days[j]] = [days[j], days[i]];
@@ -550,6 +562,7 @@
       toInterest: (parts && parts.toInterest) || 0, toPrincipal: (parts && parts.toPrincipal) || 0,
       principal: loan.principal, accrued: loan.accrued,
       ...(type === 'lend' ? { transfer: parts.transfer, fee: parts.fee } : {}),
+      ...(type === 'adjust' ? { dPrincipal: parts.dPrincipal, dAccrued: parts.dAccrued } : {}),
     });
   }
   // 取引で手持ち資金がいくら動いたか（貸付は振込金額だけ出ていく）
@@ -955,19 +968,40 @@
   }
 
   // カルテを書き換える。data は PROFILE・SECRET の各項目、emergency（3名分）、guarantorGone、nextVisit（日 / null / 省略で変えない）
+  // data.newId（顧客番号）と data.state（来店回数・調査済み・隠し資産を回収済み・断った）も直せる
   function updateCustomer(s, id, data) {
     const c = customerOf(s, id);
     if (!c) throw new GameError('その客は台帳にいません');
     const v = readCustomer(data, true);
     const p = s.people[id];
+    const newId = data.newId === undefined ? id : readField(txt('顧客番号', 10, true), data.newId);
+    if (newId !== id && customerOf(s, newId)) throw new GameError(`顧客番号${newId}はほかの客が使っています`);
+    const st = data.state || {};
+    const visits = st.visits === undefined ? p.visits : readField(num('来店回数', 'int', 0, 10000), st.visits);
     const visitChanged = data.nextVisit !== undefined && data.nextVisit !== p.nextVisit;
     if (visitChanged) checkVisit(s, c, data.nextVisit);   // まちがいがあれば、何も書き換えずに止める
     Object.assign(c, v);
     p.want = v.want;
+    p.visits = visits;
     if (typeof data.guarantorGone === 'boolean') p.guarantorGone = data.guarantorGone;
-    log(s, 'info', `${c.name}（No.${c.id}）の顧客カルテを更新した。`);
+    for (const k of ['investigated', 'hiddenUsed', 'refused']) if (typeof st[k] === 'boolean') p[k] = st[k];
+    if (newId !== id) renameCustomer(s, id, newId);
+    log(s, 'info', `${c.name}（No.${c.id}）の顧客カルテを更新した。${newId !== id ? `顧客番号を${id}から${newId}に変えた。` : ''}`);
     if (visitChanged) setVisit(s, c, data.nextVisit);
     return c;
+  }
+
+  // 顧客番号を変える。貸付・取引・不明入金・来店中の記録もつけ替える
+  function renameCustomer(s, from, to) {
+    const c = customerOf(s, from);
+    c.id = to;
+    s.people[to] = s.people[from];
+    delete s.people[from];
+    for (const l of s.loans) if (l.customerId === from) l.customerId = to;
+    for (const t of s.txs) if (t.customerId === from) t.customerId = to;
+    for (const u of s.unknowns) if (u.ownerId === from) u.ownerId = to;
+    if (s.visitor === from) s.visitor = to;
+    if (Number(to) >= s.nextCustomerNo) s.nextCustomerNo = Number(to) + 1;
   }
 
   // 顧客を追加する。data.auto が true なら本当の情報（ゲームの設定）はおまかせ。来店予定の初期値は明日
@@ -1049,9 +1083,258 @@
     return `\uFEFF${lines.join('\r\n')}\r\n`;
   }
 
+  // ---- 帳簿を手で直す（直した内容は【修正】として業務日誌に残す） ----
+
+  const PAY_IN = ['jump', 'jumpPlus', 'payoff', 'partial', 'collect', 'guarantor', 'hidden', 'windfall', 'manual'];   // 直せる入金
+  const ACCRUE = ['accrue', 'lateAccrue', 'earlyAccrue'];                                                            // 直せるジャンプ金の発生
+  const STATUSES = ['返済中', '延滞', '完済', '夜逃げ', '不渡り'];
+  const canEditTx = (t) => !t.canceled && (PAY_IN.includes(t.type) || ACCRUE.includes(t.type));
+
+  function noteEdit(s, text) {
+    s.edits.push({ day: s.day, text });
+    log(s, 'edit', `【修正】${text}`);
+  }
+
+  // 入金の中身が変わったとき、貸付の残高・累計と手持ち資金を合わせる（di・dp は増えた額）
+  function payDelta(s, loan, di, dp) {
+    loan.accrued -= di;
+    loan.principal -= dp;
+    loan.interestPaid += di;
+    loan.collected += di + dp;
+    s.cash += di + dp;
+  }
+
+  // 残高を直したあとの状態：返し終わったら完済、完済から残高が戻ったら返済中、不渡りは不渡り額を元金残高に合わせる
+  function fixStatus(s, loan) {
+    if (loan.status === '不渡り') loan.fuwatari = loan.principal;
+    else if (isActive(loan) && loan.principal <= 0 && loan.accrued <= 0) {
+      loan.principal = 0;
+      loan.accrued = 0;
+      close(s, loan, '完済');
+    } else if (loan.status === '完済' && (loan.principal > 0 || loan.accrued > 0)) {
+      loan.status = '返済中';
+      loan.closedDay = null;
+      while (loan.due <= s.day) loan.due += stepOf(loan.cycle);
+    }
+  }
+
+  // 取引を直す。入金はジャンプ金・元金詰めの内訳と日付、ジャンプ金の発生は金額と日付
+  function editTx(s, txId, d) {
+    const t = s.txs.find((x) => x.id === txId);
+    if (!t) throw new GameError('その取引は見つかりません');
+    if (!canEditTx(t)) throw new GameError(t.canceled ? '取り消した取引は直せません' : 'この取引は直接は直せません（貸付の編集や、充当の取り消しから直してください）');
+    const loan = loanOf(s, t.loanId), c = customerOf(s, loan.customerId) || { name: '' };
+    const day = readField(num('日付', 'day', 1, s.day), d.day);
+    const note = readField(txt('メモ', 200), d.note == null ? t.note || '' : d.note);
+    const was = `${fmtDay(t.day)}の${TX[t.type].label}（${c.name} No.${loan.id}）`;
+    let change;
+    if (PAY_IN.includes(t.type)) {
+      const ti = readField(num('ジャンプ金に充てた額', 'yen', 0, 100000000), d.toInterest);
+      const tp = readField(num('元金に充てた額', 'yen', 0, 100000000), d.toPrincipal);
+      if (ti + tp === 0) throw new GameError('入金額が0円になります。なかったことにするなら「取り消す」を使ってください');
+      const di = ti - t.toInterest, dp = tp - t.toPrincipal;
+      if (di > loan.accrued) throw new GameError(`ジャンプ金に充てられるのは、あと${yen(loan.accrued)}までです（未払いジャンプ金を超えます）`);
+      if (dp > loan.principal) throw new GameError(`元金に充てられるのは、あと${yen(loan.principal)}までです（元金残高を超えます）`);
+      if (s.cash + di + dp < 0) throw new GameError(`手持ち資金が足りません（減らした${yen(-(di + dp))}を払い戻す形になります）`);
+      payDelta(s, loan, di, dp);
+      const n = (x) => x.toLocaleString('ja-JP');
+      change = `ジャンプ(${n(t.toInterest)}→${n(ti)})＋元金詰め(${n(t.toPrincipal)}→${n(tp)})`;
+      Object.assign(t, { toInterest: ti, toPrincipal: tp, amount: ti + tp });
+    } else {
+      const a = readField(num('ジャンプ金', 'yen', 0, 100000000), d.amount);
+      if (loan.accrued + a - t.amount < 0) throw new GameError('もう払われたジャンプ金より少なくはできません');
+      loan.accrued += a - t.amount;
+      change = `ジャンプ金(${t.amount.toLocaleString('ja-JP')}→${a.toLocaleString('ja-JP')})`;
+      t.amount = a;
+    }
+    if (day !== t.day) change += `、日付 ${fmtDay(t.day)}→${fmtDay(day)}`;
+    Object.assign(t, { day, note, edited: true });
+    fixStatus(s, loan);
+    noteEdit(s, `${was}：${change}`);
+  }
+
+  // 取引を取り消す（記録は取り消し線で残す）
+  function cancelTx(s, txId) {
+    const t = s.txs.find((x) => x.id === txId);
+    if (!t) throw new GameError('その取引は見つかりません');
+    if (!canEditTx(t)) throw new GameError(t.canceled ? 'もう取り消してあります' : 'この取引は取り消せません（貸付の編集や、充当の取り消しから直してください）');
+    const loan = loanOf(s, t.loanId), c = customerOf(s, loan.customerId) || { name: '' };
+    if (PAY_IN.includes(t.type)) {
+      if (s.cash < t.amount) throw new GameError(`手持ち資金が足りません（取り消すと${yen(t.amount)}を払い戻す形になります）`);
+      payDelta(s, loan, -t.toInterest, -t.toPrincipal);
+    } else {
+      if (loan.accrued < t.amount) throw new GameError('このジャンプ金はもう払われているので取り消せません（先に入金を直してください）');
+      loan.accrued -= t.amount;
+    }
+    t.canceled = true;
+    t.canceledDay = s.day;
+    fixStatus(s, loan);
+    noteEdit(s, `${fmtDay(t.day)}の${TX[t.type].label}（${c.name} No.${loan.id}・${yen(t.amount)}）を取り消した。`);
+  }
+
+  // 入金を手で記録する（入金台帳から）。ジャンプ金に先に充て、多い分で元金を詰める
+  function recordPayment(s, loanId, amount, note) {
+    const loan = loanOf(s, loanId);
+    if (!loan || !isActive(loan)) throw new GameError('入金を記録できるのは、返済中か延滞中の貸付だけです');
+    const a = readField(num('入金額', 'yen', 1, owedOf(loan)), amount);
+    const memo = readField(txt('メモ', 200), note);
+    const c = customerOf(s, loan.customerId);
+    const wasLate = loan.status === '延滞';
+    pay(s, loan, a, 'manual');
+    const t = s.txs[s.txs.length - 1];
+    t.note = memo;
+    let text = `${c.name}（No.${loan.id}）の入金${yen(a)}を手入力で記録した。ジャンプ(${num(t.toInterest)})＋元金詰め(${num(t.toPrincipal)})。`;
+    if (loan.status === '完済') text += '完済！';
+    else if (wasLate && loan.accrued === 0) {
+      loan.status = '返済中';
+      loan.overdueDays = 0;
+      loan.lateSince = null;
+      loan.jumps++;
+      text += `ジャンプ金が満額そろってジャンプ成立。次回の期日は${fmtDay(loan.due)}。`;
+    }
+    log(s, 'plus', text);
+    return t;
+  }
+
+  // 貸付を直す。①〜⑤・貸付日・元金残高・未払いジャンプ金・次回期日・状態・遅れはじめた期日・ジャンプ回数
+  function editLoan(s, id, d) {
+    const loan = loanOf(s, id);
+    if (!loan) throw new GameError('その貸付は見つかりません');
+    const { principal: lent, payoff } = parseNotation(d.notation);
+    if (!(lent >= CONFIG.minLend && lent % CONFIG.lendUnit === 0)) throw new GameError(`①の元金は${yen(CONFIG.minLend)}以上、${yen(CONFIG.lendUnit)}単位にしてください`);
+    const interest0 = payoff - lent;
+    if (interest0 <= 0) throw new GameError('①の完済金は元金より多くしてください');
+    const rate = (1000 * interest0) / lent;
+    if (rate < CONFIG.minRate || rate > CONFIG.maxRate) throw new GameError(`利息は元金の${CONFIG.minRate / 10}%〜${CONFIG.maxRate / 10}%にしてください（今は${pctText(rate)}）`);
+    const cycle = readField(num('②S', 'int', CONFIG.minCycle, CONFIG.maxCycle), d.cycle);
+    const lentDay = readField(num('貸付日', 'day', 1, s.day), d.lentDay);
+    const firstDue = readField(num('③初回の期日', 'day', lentDay + 1, CONFIG.maxDays), d.firstDue);
+    const transfer = readField(num('④振込金額', 'yen', 1, lent), d.transfer);
+    const fee = lent - transfer;
+    if (fee > Math.floor(lent * CONFIG.maxFeeRatio)) throw new GameError(`手数料（元金−振込金額）は元金の${CONFIG.maxFeeRatio * 10}割（${yen(Math.floor(lent * CONFIG.maxFeeRatio))}）までです`);
+    const account = readField(txt('⑤振込先口座', 100), d.account);
+    const principal = readField(num('元金残高', 'yen', 0, 100000000), d.principal);
+    const accrued = readField(num('未払いジャンプ金', 'yen', 0, 100000000), d.accrued);
+    const status = readField({ label: '状態', kind: 'select', options: STATUSES }, d.status);
+    const jumps = readField(num('ジャンプ回数', 'int', 0, 10000), d.jumps);
+    const late = ['延滞', '夜逃げ', '不渡り'].includes(status);
+    const lateSince = late ? readField(num('遅れはじめた期日', 'day', 1, s.day), d.lateSince) : null;
+    const active = status === '返済中' || status === '延滞';
+    const due = active ? readField(num('次回期日', 'day', s.day + 1, CONFIG.maxDays), d.due) : loan.due;
+    if (status === '完済' && (principal > 0 || accrued > 0)) throw new GameError('完済にするなら、元金残高と未払いジャンプ金を0円にしてください');
+    if (status !== '完済' && principal === 0 && accrued === 0) throw new GameError('元金残高も未払いジャンプ金も0円なら、状態は完済にしてください');
+    const dTransfer = transfer - loan.transfer;
+    if (s.cash - dTransfer < 0) throw new GameError(`手持ち資金が足りません（振込金額を${yen(dTransfer)}増やすと、手持ち資金から出ていきます）`);
+
+    const c = customerOf(s, loan.customerId) || { name: '' };
+    const show = (k, v) => (['lentDay', 'firstDue', 'due', 'lateSince'].includes(k) ? (v ? fmtDay(v) : '—') : typeof v === 'number' && k !== 'cycle' && k !== 'jumps' ? yen(v) : v || '—');
+    const LABEL = { notation: '①', cycle: '②S', firstDue: '③初回の期日', transfer: '④振込金額', account: '⑤振込先口座', lentDay: '貸付日', principal: '元金残高', accrued: '未払いジャンプ金', due: '次回期日', status: '状態', lateSince: '遅れはじめた期日', jumps: 'ジャンプ回数' };
+    const before = { notation: notationOf(loan.lent, loan.payoff0), cycle: loan.cycle, firstDue: loan.firstDue, transfer: loan.transfer, account: loan.account, lentDay: loan.lentDay, principal: loan.principal, accrued: loan.accrued, due: loan.due, status: loan.status, lateSince: loan.lateSince, jumps: loan.jumps };
+    const dLent = lent - loan.lent;
+    const adjP = principal - (loan.principal + dLent);   // ①の元金を変えて動く分のほかに、元金残高を手で直した分
+    const adjA = accrued - loan.accrued;
+
+    s.cash -= dTransfer;
+    const lendTx = s.txs.find((t) => t.loanId === id && t.type === 'lend');
+    Object.assign(lendTx, { amount: lent, transfer, fee, day: lentDay });
+    const feeTx = s.txs.find((t) => t.loanId === id && t.type === 'fee');
+    if (feeTx && fee > 0) Object.assign(feeTx, { amount: fee, day: lentDay });
+    else if (feeTx) s.txs = s.txs.filter((t) => t !== feeTx);
+    Object.assign(loan, { lent, payoff0: payoff, interest0, rate, cycle, lentDay, firstDue, transfer, fee, account, principal, accrued, jumps });
+    if (!feeTx && fee > 0) { tx(s, loan, 'fee', fee); s.txs[s.txs.length - 1].day = lentDay; }
+    if (adjP || adjA) {
+      tx(s, loan, 'adjust', 0, { dPrincipal: adjP, dAccrued: adjA });
+      s.adjust.principal += adjP;
+    }
+    const was = loan.status;
+    loan.status = status;
+    loan.lateSince = lateSince;
+    loan.overdueDays = late ? s.day - lateSince : 0;
+    if (active) { loan.due = due; loan.closedDay = null; }
+    if (status === '夜逃げ' || status === '不渡り') loan.closedDay = (was === '夜逃げ' || was === '不渡り') && loan.closedDay ? loan.closedDay : s.day;
+    if (status === '完済' && was !== '完済') close(s, loan, '完済');
+    loan.fuwatari = status === '不渡り' ? principal : 0;
+    loan.fuwatariDay = status === '不渡り' ? (was === '不渡り' && loan.fuwatariDay ? loan.fuwatariDay : s.day) : null;
+    loan.collected = loan.interestPaid + loan.lent - loan.principal;
+    const after = { notation: notationOf(lent, payoff), cycle, firstDue, transfer, account, lentDay, principal, accrued, due: loan.due, status, lateSince, jumps };
+    const diff = Object.keys(LABEL).filter((k) => before[k] !== after[k]).map((k) => `${LABEL[k]} ${show(k, before[k])}→${show(k, after[k])}`);
+    noteEdit(s, `貸付No.${id}（${c.name}）：${diff.length ? diff.join('、') : '変更なし'}`);
+  }
+
+  // 店の数字を直す（手持ち資金・凄み・警察の目）。手持ち資金を直した差額は帳簿の差額として残す
+  function editShop(s, d) {
+    const cash = readField(num('手持ち資金', 'yen', 0, 10000000000), d.cash);
+    const sugomi = readField(num('凄み', 'int', 1, 5), d.sugomi);
+    const police = readField(num('警察の目', 'int', 0, 99), d.police);
+    const parts = [];
+    if (cash !== s.cash) parts.push(`手持ち資金 ${yen(s.cash)}→${yen(cash)}`);
+    if (sugomi !== s.sugomi) parts.push(`凄み ${s.sugomi}→${sugomi}`);
+    if (police !== s.police) parts.push(`警察の目 ${s.police}→${police}`);
+    s.adjust.cash += cash - s.cash;
+    Object.assign(s, { cash, sugomi, police });
+    noteEdit(s, `店の数字：${parts.length ? parts.join('、') : '変更なし'}`);
+  }
+
+  // 不明入金を直す（金額・受付日）・消す（まだ充当も返金もしていないものだけ）
+  function editUnknown(s, id, d) {
+    const u = unknownOf(s, id);
+    if (!u) throw new GameError('その不明入金は見つかりません');
+    const used = u.allocated + u.refunded;
+    const amount = readField(num('不明入金の金額', 'yen', Math.max(1, used), 100000000), d.amount);
+    const day = readField(num('受付日', 'day', 1, s.day), d.day);
+    if (s.cash + amount - u.amount < 0) throw new GameError('手持ち資金が足りません');
+    const text = `${fmtDay(u.day)}の不明入金：金額 ${yen(u.amount)}→${yen(amount)}${day !== u.day ? `、受付日 ${fmtDay(u.day)}→${fmtDay(day)}` : ''}`;
+    s.cash += amount - u.amount;
+    u.amount = amount;
+    u.day = day;
+    noteEdit(s, text);
+  }
+  function deleteUnknown(s, id) {
+    const u = unknownOf(s, id);
+    if (!u) throw new GameError('その不明入金は見つかりません');
+    if (u.allocated > 0 || u.refunded > 0) throw new GameError('充当か返金が済んでいる不明入金は消せません（先に充当を取り消してください）');
+    if (s.cash < u.amount) throw new GameError('手持ち資金が足りません');
+    s.cash -= u.amount;
+    s.unknowns = s.unknowns.filter((x) => x !== u);
+    noteEdit(s, `${fmtDay(u.day)}の不明入金（${yen(u.amount)}）を消した。`);
+  }
+
+  // 業務日誌を直す・消す・書き足す
+  function editLog(s, index, text) {
+    const e = s.log[index];
+    if (!e) throw new GameError('その日誌は見つかりません');
+    e.text = readField(txt('日誌', 500, true), text);
+    e.edited = true;
+  }
+  function deleteLog(s, index) {
+    if (!s.log[index]) throw new GameError('その日誌は見つかりません');
+    s.log.splice(index, 1);
+  }
+  function addNote(s, text) {
+    s.log.push({ day: s.day, kind: 'note', text: readField(txt('日誌', 500, true), text), manual: true });
+  }
+
+  // 取引明細の残高（取引ごとに、そのあとの元金残高・未払いジャンプ金）。直した取引も反映して数え直す
+  function balancesOf(s, loan) {
+    const out = {};
+    let principal = 0, accrued = 0;
+    for (const t of s.txs.filter((x) => x.loanId === loan.id)) {
+      if (!t.canceled) {
+        if (t.type === 'lend') { principal = t.amount; accrued = 0; }
+        else if (ACCRUE.includes(t.type)) accrued += t.amount;
+        else if (TX[t.type].pay) { accrued -= t.toInterest; principal -= t.toPrincipal; }
+        else if (t.type === 'adjust') { principal += t.dPrincipal; accrued += t.dAccrued; }
+      }
+      out[t.id] = { principal, accrued };
+    }
+    return out;
+  }
+
   // 前の版の保存データを今の形にそろえる
   function migrate(s) {
     s.customers.forEach(normalizeCustomer);
+    if (!s.edits) s.edits = [];
+    if (!s.adjust) s.adjust = { cash: 0, principal: 0 };
     if (s.nextCustomerNo == null) s.nextCustomerNo = 1 + Math.max(0, ...s.customers.map((c) => Number(c.id) || 0));
     s.v = 8;
     return s;
@@ -1118,8 +1401,19 @@
     return { from, to: s.day, days: s.day - from, agenda: s.over ? [] : agendaOf(s) };
   }
 
-  // 期間の標準の目標（1日あたりの目安 × 日数、10万円単位）
-  const goalFor = (days) => Math.max(100000, Math.round((CONFIG.goalPerDay * days) / 100000) * 100000);
+  // 期間の標準の目標（goalPoints の間を直線でならす。1年より長いときは、半年〜1年の伸び方で延ばす。10万円単位）
+  function goalFor(days) {
+    const pts = CONFIG.goalPoints;
+    let v;
+    if (days <= pts[0][0]) v = (pts[0][1] * days) / pts[0][0];
+    else {
+      let i = pts.findIndex(([d]) => d >= days);
+      if (i < 0) i = pts.length - 1;
+      const [d0, g0] = pts[i - 1], [d1, g1] = pts[i];
+      v = g0 + ((g1 - g0) * (days - d0)) / (d1 - d0);
+    }
+    return Math.max(100000, Math.round(v / 100000) * 100000);
+  }
 
   // 期間（最終日）と目標の純利を変える。最終日は締め日に限る（最後の締めで不渡りを計上してから判定するため）。
   // 期間が終わって結果が出たあとでも、延ばせば営業を続けられる。
@@ -1222,7 +1516,8 @@
     const fuwatari = s.loans.reduce((a, l) => a + l.fuwatari, 0);
     const byKind = {};
     for (const c of s.costs) byKind[c.kind] = (byKind[c.kind] || 0) + c.amount;
-    return { sales, jumpSales, feeSales, expenses, fuwatari, net: sales - expenses - fuwatari, byKind };
+    const adj = s.adjust || { cash: 0, principal: 0 };
+    return { sales, jumpSales, feeSales, expenses, fuwatari, net: sales - expenses - fuwatari, byKind, adjCash: adj.cash, adjPrincipal: adj.principal };
   }
 
   // 次の締めで不渡りになる見込みの貸付（夜逃げして、締めの日に期日から2週間以上たっているもの）
@@ -1308,6 +1603,8 @@
     investigate, lend, lendLimit, quote, refuse, collect, setMemo, endDay, skipToNext, agendaOf,
     PROFILE, SECRET, EMERGENCY_ROWS, SOURCES, WEAK_TYPES, sourceText, updateCustomer, addCustomer,
     canDeleteCustomer, deleteCustomer, restoreCustomer, rosterOf, migrate, exportCustomers,
+    STATUSES, PAY_IN, canEditTx, editTx, cancelTx, recordPayment, editLoan, editShop, editUnknown, deleteUnknown,
+    editLog, deleteLog, addNote, balancesOf,
     COSTS, pl, fuwatariPlan, closingOf, nextClosingDay, lateDaysOf, fuwatariDayOf, onBooks,
     totals, schedule, ledger, nigeChance, capRange, owedOf, nextJumpOf, isActive,
     visitorOf, customerOf, loanOf, hasGuarantor,
