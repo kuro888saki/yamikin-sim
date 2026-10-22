@@ -4,16 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>どてらい金融 顧客管理システム</title>
-  <link rel="stylesheet" href="style.css?v=7">
+  <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
   <header class="top">
     <div class="brand">
       <span class="shop">浪速 どてらい金融</span>
-      <h1>顧客管理システム<small>45日勝負（仮）</small></h1>
+      <h1>顧客管理システム<small id="period-label"></small></h1>
     </div>
     <dl class="kpis" id="kpis"></dl>
-    <button class="ghost on-dark" data-act="reset" title="台帳を読み直して1日目からやり直す">最初から</button>
+    <div class="top-actions">
+      <button class="ghost on-dark" data-act="period-open" title="期間（最終日）と目標の純利を変える">期間・目標</button>
+      <button class="ghost on-dark" data-act="reset" title="台帳を読み直して1日目からやり直す">最初から</button>
+    </div>
   </header>
 
   <nav class="tabs" id="tabs" aria-label="画面の切り替え"></nav>
@@ -36,6 +39,10 @@
     <div class="sheet" id="alloc-body" role="dialog" aria-modal="true" aria-label="不明入金を充当する"></div>
   </div>
 
+  <div class="overlay" id="period" hidden>
+    <div class="sheet" id="period-body" role="dialog" aria-modal="true" aria-label="期間・目標"></div>
+  </div>
+
   <div class="overlay" id="loader" hidden>
     <div class="sheet">
       <h2>台帳を読み込めませんでした</h2>
@@ -49,7 +56,7 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="logic.js?v=7"></script>
-  <script src="ui.js?v=7"></script>
+  <script src="logic.js?v=8"></script>
+  <script src="ui.js?v=8"></script>
 </body>
 </html>

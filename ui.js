@@ -3,7 +3,7 @@
   'use strict';
   const G = window.Game;
   const $ = (sel) => document.querySelector(sel);
-  const SAVE_KEY = 'dotera-kinyu:v6';
+  const SAVE_KEY = 'dotera-kinyu:v7';
 
   let s = null;
   let mark = 0;                 // 業務日誌で「今日の分」として見せるログの開始位置
@@ -17,8 +17,10 @@
     cust: { q: '', status: 'すべて', sort: 'id' },
     loans: { status: 'すべて', sort: 'id' },
     resultClosed: false,        // 結果を閉じて帳簿を見返しているとき
+    period: null,               // 期間・目標の画面 { end, goal }
   };
-  let form = { visitor: null, amount: 10000, ratePct: 10, cycle: 10 };
+  // 受付の入力欄 ①notation ②cycle ③firstDue ④transfer ⑤account。初回と振込金額は、手で変えるまで①②に合わせて動かす
+  let form = { visitor: null };
 
   // ---- 表示の小道具 ----
 
@@ -32,19 +34,18 @@
   const rowAttrs = (act, id) => `data-act="${act}" data-id="${esc(id)}" tabindex="0" role="button"`;
   const custLink = (c) => `<button class="link" data-act="open-customer" data-id="${esc(c.id)}">${esc(c.name)}</button>`;
   const loanLink = (loan) => `<button class="link" data-act="open-loan" data-id="${loan.id}">No.${loan.id}</button>`;
-  const dayLink = (d) => (d > G.horizonDay() || d < 1 ? `<span class="muted">${G.fmtDay(d)}</span>` : `<button class="link" data-act="goto-day" data-day="${d}">${G.fmtDay(d)}</button>`);
-  const termsText = (rate, cycle) => {
-    const label = G.termsLabel(rate, cycle), desc = G.termsDesc(rate, cycle);
-    return label === desc ? desc : `${label}（${desc}）`;
+  const dayLink = (d) => (d > G.horizonDay(s) || d < 1 ? `<span class="muted">${G.fmtDay(d)}</span>` : `<button class="link" data-act="goto-day" data-day="${d}">${G.fmtDay(d)}</button>`);
+  // 条件の表記：①5-6.5 ②10S。下に「3割・トサン」のような補足
+  const rateNote = (l) => {
+    const label = G.termsLabel(l.rate, l.cycle);
+    return `1回${G.pctText(l.rate)}${label === G.termsDesc(l.rate, l.cycle) ? '' : `・${label}`}`;
   };
-  const termsCell = (l) => {
-    const label = G.termsLabel(l.rate, l.cycle), desc = G.termsDesc(l.rate, l.cycle);
-    return label === desc ? esc(desc) : `${esc(label)}<span class="sub">${esc(desc)}</span>`;
-  };
-  const txSign = (t) => G.TX[t.type].cash;
+  const notationText = (l) => `${G.notationOf(l.lent, l.payoff0)}・${l.cycle}S`;
+  const termsCell = (l) => `<b>${esc(notationText(l))}</b><span class="sub">${esc(rateNote(l))}</span>`;
+  const txSign = (t) => Math.sign(G.cashOf(t));
   const signed = (n) => (n < 0 ? `−${num(-n)}` : num(n));
   const signedYen = (n) => `${signed(n)}円`;
-  const lastDay = () => G.fmtDay(G.CONFIG.days);   // 最終日
+  const lastDay = () => G.fmtDay(s.days);   // 最終日
   // 取引の内訳。例：ジャンプ(80,000)＋元金詰め(149,000)
   function breakdown(t, principalWord) {
     const parts = [];
@@ -54,10 +55,11 @@
   }
   const collectedLine = (jump, prin) => `<p class="breakdown">回収累計 <b>${yen(jump + prin)}</b> ＝ ジャンプ金累計 <b class="in">${yen(jump)}</b> ＋ 回収済元金 <b>${yen(prin)}</b></p>`;
   // 純利 ＝ 総売上 − 経費 − 不渡り
-  const plLine = (p) => `<p class="breakdown pl">純利 <b class="${p.net < 0 ? 'out' : 'in'}">${signedYen(p.net)}</b> ＝ 総売上 <b>${yen(p.sales)}</b> − 経費 <b>${yen(p.expenses)}</b> − 不渡り <b class="${p.fuwatari ? 'out' : ''}">${yen(p.fuwatari)}</b></p>`;
+  const plLine = (p) => `<p class="breakdown pl">純利 <b class="${p.net < 0 ? 'out' : 'in'}">${signedYen(p.net)}</b> ＝ 総売上 <b>${yen(p.sales)}</b>${p.feeSales ? `<small>（ジャンプ金 ${num(p.jumpSales)}＋振込手数料 ${num(p.feeSales)}）</small>` : ''} − 経費 <b>${yen(p.expenses)}</b> − 不渡り <b class="${p.fuwatari ? 'out' : ''}">${yen(p.fuwatari)}</b></p>`;
   function txSummary(t) {
     switch (t.type) {
-      case 'lend': return `貸付(${num(t.amount)})`;
+      case 'lend': return `貸付：元金(${num(t.amount)})・振込(${num(t.transfer)})`;
+      case 'fee': return `振込手数料(${num(t.amount)})：元金から天引きして売上に計上`;
       case 'accrue': case 'lateAccrue': case 'earlyAccrue': return `${G.TX[t.type].label}(${num(t.amount)})`;
       case 'overdue': return `延滞（未払いジャンプ金 ${num(t.accrued)}）`;
       case 'flee': return `夜逃げ・連絡不通（元金 ${num(t.principal)}・未払いジャンプ金 ${num(t.accrued)}）`;
@@ -73,8 +75,9 @@
     const k = txSign(t);
     if (t.type === 'overdue' || t.type === 'flee') return '<span class="muted">—</span>';
     if (t.type === 'fuwatari') return `<span class="bad">${num(t.amount)}</span>`;
+    if (t.type === 'fee') return `<span class="in" title="お金は動かない（振込金額を減らした分）">売上 ${num(t.amount)}</span>`;
     if (k > 0) return `<span class="in">+${num(t.amount)}</span>`;
-    if (k < 0) return `<span class="out">−${num(t.amount)}</span>`;
+    if (k < 0) return `<span class="out">−${num(-G.cashOf(t))}</span>`;
     return `<span class="muted">${signed(t.amount)}</span>`;   // 充当・取消・ジャンプ金発生（お金は動かない）
   };
 
@@ -86,7 +89,7 @@
   function loadSave() {
     try {
       const d = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
-      return d && d.s && d.s.v === 6 ? d : null;
+      return d && d.s && d.s.v === 7 ? d : null;
     } catch (e) { return null; }
   }
   function clearSave() {
@@ -174,19 +177,21 @@
     else if (a === 'investigate') act(() => G.investigate(s));
     else if (a === 'refuse') act(() => G.refuse(s));
     else if (a === 'collect') act(() => G.collect(s, Number(el.dataset.loan), el.dataset.cmd));
-    else if (a === 'preset') {
-      const p = G.PRESETS[el.dataset.key];
-      form.cycle = p.cycle;
-      form.ratePct = p.rate / 10;
+    else if (a === 'step') {
+      form.cycle = Math.min(G.CONFIG.maxCycle, Math.max(G.CONFIG.minCycle, (form.cycle || 0) + Number(el.dataset.d)));
       syncTermInputs();
-    } else if (a === 'step') {
-      const d = Number(el.dataset.d);
-      if (el.dataset.field === 'cycle') form.cycle = Math.min(G.CONFIG.maxCycle, Math.max(G.CONFIG.minCycle, (form.cycle || 0) + d));
-      else form.ratePct = Math.min(100, Math.max(1, Math.round(((form.ratePct || 0) + d) * 2) / 2));
-      syncTermInputs();
-    } else if (a === 'end') {
+    } else if (a === 'period-open') {
+      if (s.over && !s.over.byTime) { toast('店じまいしたので、期間は変えられません'); return; }
+      ui.period = { end: s.days, goal: s.goal };
+      ui.resultClosed = true;
+      $('#result').hidden = true;
+      renderPeriod();
+    }
+    else if (a === 'period-close') { ui.period = null; renderPeriod(); renderResult(); }
+    else if (a === 'period-std') { ui.period.goal = G.goalFor(ui.period.end); renderPeriod(); }
+    else if (a === 'end') {
       if (s.over) { ui.resultClosed = false; renderResult(); return; }
-      act(() => { const before = s.log.length; G.endDay(s); mark = before; });
+      act(() => { const before = s.log.length; G.endDay(s); mark = before; ui.calDay = null; ui.calMonth = G.monthOffsetOfDay(s.day); });
       if (!s.over) window.scrollTo({ top: 0, behavior: 'smooth' });
     } else if (a === 'open-customer') { ui.drawer = { kind: 'customer', id: el.dataset.id }; renderDrawer(true); }
     else if (a === 'open-loan') { ui.drawer = { kind: 'loan', id: Number(el.dataset.id) }; renderDrawer(true); }
@@ -197,7 +202,7 @@
       render();
       window.scrollTo(0, 0);
     }
-    else if (a === 'cal-month') { ui.calMonth = Math.max(MONTHS[0], Math.min(MONTHS[MONTHS.length - 1], Number(el.dataset.offset))); renderView(); }
+    else if (a === 'cal-month') { const m = months(); ui.calMonth = Math.max(m[0], Math.min(m[m.length - 1], Number(el.dataset.offset))); renderView(); }
     else if (a === 'alloc-open') { ui.alloc = { id: Number(el.dataset.id), loanId: null, amount: null }; renderAlloc(); }
     else if (a === 'alloc-close') { ui.alloc = null; renderAlloc(); }
     else if (a === 'alloc-cancel') {
@@ -225,6 +230,7 @@
   // 行や日付マスをキーボードでも開けるようにする
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && ui.alloc) { ui.alloc = null; renderAlloc(); return; }
+    if (ev.key === 'Escape' && ui.period) { ui.period = null; renderPeriod(); renderResult(); return; }
     if (ev.key === 'Escape' && ui.drawer) { ui.drawer = null; renderDrawer(); return; }
     const el = ev.target;
     if ((ev.key === 'Enter' || ev.key === ' ') && el.getAttribute && el.getAttribute('role') === 'button' && el.tagName !== 'BUTTON') {
@@ -241,20 +247,25 @@
       act(() => { G.allocateUnknown(s, ui.alloc.id, ui.alloc.loanId, amount); ui.alloc = null; });
       return;
     }
+    if (ev.target.id === 'period-form') {
+      ev.preventDefault();
+      act(() => { G.setPeriod(s, ui.period.end, ui.period.goal); ui.period = null; ui.resultClosed = false; });
+      return;
+    }
     if (ev.target.id !== 'terms') return;
     ev.preventDefault();
-    act(() => G.lend(s, form.amount, Math.round(form.ratePct * 10), form.cycle));
+    act(() => G.lend(s, form));
   });
 
   let memoTimer = null;
   document.addEventListener('input', (ev) => {
     const t = ev.target;
-    if (t.name === 'amount') {
-      form.amount = Math.floor(Number(t.value));
-      document.querySelectorAll('[name="amount"]').forEach((x) => { if (x !== t) x.value = t.value; });
-      updateQuote();
-    } else if (t.name === 'cycle') { form.cycle = Number(t.value); updateQuote(); }
-    else if (t.name === 'ratePct') { form.ratePct = Number(t.value); updateQuote(); }
+    if (t.name === 'notation') { form.notation = t.value; followTerms(); updateQuote(); }
+    else if (t.name === 'cycle') { form.cycle = Number(t.value); followTerms(); updateQuote(); }
+    else if (t.name === 'firstDue') { form.firstDue = G.dayOfIso(t.value); form.firstTouched = true; updateQuote(); }
+    else if (t.name === 'transfer') { form.transfer = t.value === '' ? NaN : Number(t.value); form.transferTouched = true; updateQuote(); }
+    else if (t.name === 'account') { form.account = t.value; updateQuote(); }
+    else if (t.id === 'period-goal') { ui.period.goal = t.value === '' ? NaN : Number(t.value); }
     else if (t.id === 'cust-q') { ui.cust.q = t.value; renderCustomerTable(); }
     else if (t.id === 'alloc-amount') { ui.alloc.amount = t.value === '' ? NaN : Math.floor(Number(t.value)); updateAllocPreview(); }
     else if (t.id === 'memo') {
@@ -271,6 +282,14 @@
     else if (t.id === 'loan-sort') { ui.loans.sort = t.value; renderView(); }
     else if (t.id === 'cal-customer') { ui.calCustomer = t.value; renderView(); }
     else if (t.id === 'alloc-loan') { ui.alloc.loanId = t.value ? Number(t.value) : ''; updateAllocPreview(); }
+    else if (t.id === 'cal-month-select') { ui.calMonth = Number(t.value); renderView(); }
+    else if (t.id === 'period-end') {
+      // 目標を標準のまま触っていなければ、新しい期間の標準に合わせる
+      const wasStd = ui.period.goal === G.goalFor(ui.period.end);
+      ui.period.end = Number(t.value);
+      if (wasStd) ui.period.goal = G.goalFor(ui.period.end);
+      renderPeriod();
+    }
   });
 
   // ---- 全体の描画 ----
@@ -284,16 +303,18 @@
     renderFooter();
     renderResult();
     renderAlloc();
+    renderPeriod();
   }
 
   function renderKpis() {
     const t = G.totals(s);
     const p = G.pl(s);
-    const goal = G.CONFIG.goal;
+    const goal = s.goal;
     const plan = G.fuwatariPlan(s);
     const police = Math.min(100, s.police);
+    $('#period-label').textContent = `${G.fmtDay(1)}〜${G.fmtDay(s.days)}（${s.days}日）`;
     $('#kpis').innerHTML = `
-      <div><dt>営業日</dt><dd>${G.fmtDay(s.day)}<small>${s.day}/${G.CONFIG.days}日目</small></dd></div>
+      <div><dt>営業日</dt><dd>${G.fmtDay(s.day)}<small>${s.day}/${s.days}日目</small></dd></div>
       <div><dt>手持ち資金</dt><dd>${yen(s.cash)}</dd></div>
       <div><dt>貸付総元金</dt><dd>${yen(t.balance)}<small>${t.active + t.fledCount}件</small></dd></div>
       <div><dt>次の締め</dt><dd>${G.fmtDay(plan.day)}<small>${plan.due.length ? `不渡り見込み${plan.due.length}件` : G.closingOf(plan.day)}</small></dd></div>
@@ -308,7 +329,7 @@
     const overdue = s.loans.filter((l) => l.status === '延滞').length;
     const sched = G.schedule(s);
     let soon = 0;
-    for (let d = s.day + 1; d <= Math.min(G.CONFIG.days, s.day + 7); d++) soon += (sched[d] || []).length;
+    for (let d = s.day + 1; d <= Math.min(s.days, s.day + 7); d++) soon += (sched[d] || []).length;
     const active = s.loans.filter(G.isActive).length;
     const tabs = [
       ['today', '本日の業務', s.visitor ? '来店あり' : overdue && !s.nightUsed ? `取り立て${overdue}` : '', s.visitor ? 'hot' : ''],
@@ -333,7 +354,7 @@
     const btn = $('#end');
     const overdue = s.loans.some((l) => l.status === '延滞');
     btn.disabled = !!s.visitor;
-    btn.textContent = s.over ? '結果をもう一度見る' : s.day >= G.CONFIG.days ? '勝負の結果を見る ▶' : '1日を終える ▶';
+    btn.textContent = s.over ? '結果をもう一度見る' : s.day >= s.days ? '勝負の結果を見る ▶' : '1日を終える ▶';
     let hint = `${G.fmtDayLong(s.day)}`;
     if (s.visitor) hint = '来店した客に、貸すか断るかを決めてください（本日の業務）';
     else if (overdue && !s.nightUsed) hint = '延滞客がいます。取り立てずに終えることもできます';
@@ -347,7 +368,7 @@
     const todayTx = s.txs.filter((t) => t.day === s.day);
     const todayUnk = sum(s.unknowns.filter((u) => u.day === s.day), (u) => u.amount);
     const inflow = sum(todayTx.filter((t) => txSign(t) > 0), (t) => t.amount) + todayUnk;
-    const outflow = sum(todayTx.filter((t) => txSign(t) < 0), (t) => t.amount);
+    const outflow = sum(todayTx.filter((t) => txSign(t) < 0), (t) => -G.cashOf(t));   // 貸付は振込金額
     const dueToday = todayTx.filter((t) => ['jump', 'jumpPlus', 'payoff', 'overdue'].includes(t.type)).length;
     const overdue = s.loans.filter((l) => l.status === '延滞').length;
     const today = s.log.slice(mark);
@@ -435,7 +456,7 @@
   function upcomingHtml() {
     const sched = G.schedule(s);
     const rows = [];
-    for (let d = s.day + 1; d <= Math.min(G.CONFIG.days, s.day + 7); d++) {
+    for (let d = s.day + 1; d <= Math.min(s.days, s.day + 7); d++) {
       for (const e of sched[d] || []) rows.push({ d, e });
     }
     if (!rows.length) return '<p class="empty">7日以内に支払い予定の客はいません。</p>';
@@ -453,8 +474,14 @@
     const p = s.people[c.id];
     const limit = G.lendLimit(s);
     const minLend = G.CONFIG.minLend, unit = G.CONFIG.lendUnit;
-    if (form.visitor !== c.id) form = { visitor: c.id, amount: Math.max(minLend, Math.min(limit, p.want)), ratePct: 10, cycle: 10 };
-    form.amount = Math.max(minLend, Math.min(form.amount, limit));
+    if (form.visitor !== c.id) {
+      const P = Math.max(minLend, Math.floor(Math.min(limit, p.want) / unit) * unit);
+      form = {
+        visitor: c.id, notation: G.notationOf(P, Math.round(P * 1.1)), cycle: 10,
+        firstDue: Math.min(s.days, s.day + G.stepOf(10)), transfer: P, account: p.account || '',
+        firstTouched: false, transferTouched: false,
+      };
+    }
 
     const income = p.investigated
       ? `<s>${yen(c.declaredIncome)}</s> → 本当は <span class="truth">${yen(c.income)}</span>`
@@ -472,43 +499,41 @@
           <button class="ghost" data-act="investigate" ${s.cash < G.CONFIG.investigateCost ? 'disabled' : ''}>身辺調査する（${yen(G.CONFIG.investigateCost)}）</button>
         </div>`;
 
-    const presets = Object.entries(G.PRESETS).map(([k, pr]) =>
-      `<button type="button" class="chip-btn" data-act="preset" data-key="${k}" data-rate="${pr.rate}" data-cycle="${pr.cycle}" aria-label="${pr.label}（${G.termsDesc(pr.rate, pr.cycle)}）">
-        <b>${pr.label}</b><small>${G.termsDesc(pr.rate, pr.cycle)}</small></button>`).join('');
-
-    const terms = limit >= minLend
+    const canLend = limit >= minLend * (1 - G.CONFIG.maxFeeRatio) && s.day < s.days;
+    const terms = canLend
       ? `<form id="terms" class="terms" novalidate>
-          <div class="field">
-            <label for="f-amount">貸付額</label>
-            <div class="amount-row">
-              <input type="range" name="amount" min="${minLend}" max="${limit}" step="${unit}" value="${form.amount}" aria-label="貸付額（スライダー）" ${limit === minLend ? 'disabled' : ''}>
-              <span class="unit-input"><input type="number" id="f-amount" name="amount" min="${minLend}" max="${limit}" step="${unit}" value="${form.amount}"><span>円</span></span>
+          <p class="help lead">受付表記の5項目を入力します（例：①5-6.5 ②10S ③初回11/10 ④振込金額45,000円 ⑤振込先口座）。</p>
+          <div class="field two">
+            <div>
+              <label for="f-notation">① 元金-完済金（万円）</label>
+              <input type="text" id="f-notation" name="notation" class="text-input" value="${esc(form.notation)}" placeholder="例：5-6.5" inputmode="decimal" autocomplete="off">
+              <p class="help">5-6.5 ＝ 元金50,000円に対して完済金65,000円（利息15,000円）</p>
             </div>
-            <p class="help">${yen(minLend)}〜${yen(limit)}・${yen(unit)}単位（希望額 ${yen(p.want)}・手持ち資金 ${yen(s.cash)}）</p>
-          </div>
-          <div class="field">
-            <span class="label">条件のひな形</span>
-            <div class="chip-row" id="presets">${presets}<span class="chip-btn free" id="free-chip"><b>自由設定</b><small>下で入力</small></span></div>
+            <div>
+              <label for="f-cycle">② S（支払いサイクル）</label>
+              <div class="stepper">
+                <button type="button" data-act="step" data-d="-1" aria-label="Sを1減らす">−</button>
+                <input type="number" id="f-cycle" name="cycle" min="${G.CONFIG.minCycle}" max="${G.CONFIG.maxCycle}" step="1" value="${form.cycle}">
+                <span>S</span>
+                <button type="button" data-act="step" data-d="1" aria-label="Sを1増やす">＋</button>
+              </div>
+            </div>
           </div>
           <div class="field two">
             <div>
-              <label for="f-cycle">S（支払いサイクル）</label>
-              <div class="stepper">
-                <button type="button" data-act="step" data-field="cycle" data-d="-1" aria-label="Sを1減らす">−</button>
-                <input type="number" id="f-cycle" name="cycle" min="${G.CONFIG.minCycle}" max="${G.CONFIG.maxCycle}" step="1" value="${form.cycle}">
-                <span>S</span>
-                <button type="button" data-act="step" data-field="cycle" data-d="1" aria-label="Sを1増やす">＋</button>
-              </div>
+              <label for="f-first">③ 初回の期日</label>
+              <input type="date" id="f-first" name="firstDue" class="text-input" value="${Number.isInteger(form.firstDue) ? G.isoOf(form.firstDue) : ''}" min="${G.isoOf(s.day + 1)}" max="${G.isoOf(s.days)}">
+              <p class="help" id="first-note"></p>
             </div>
             <div>
-              <label for="f-rate">利率（1Sあたり）</label>
-              <div class="stepper">
-                <button type="button" data-act="step" data-field="rate" data-d="-1" aria-label="1%下げる">−</button>
-                <input type="number" id="f-rate" name="ratePct" min="1" max="100" step="0.5" value="${form.ratePct}">
-                <span>%</span>
-                <button type="button" data-act="step" data-field="rate" data-d="1" aria-label="1%上げる">＋</button>
-              </div>
+              <label for="f-transfer">④ 振込金額</label>
+              <span class="unit-input"><input type="number" id="f-transfer" name="transfer" min="1" step="1" value="${Number.isFinite(form.transfer) ? form.transfer : ''}"><span>円</span></span>
+              <p class="help">元金との差は振込手数料として売上に計上（元金の${G.CONFIG.maxFeeRatio * 10}割まで）。上限${yen(limit)}（希望額 ${yen(p.want)}・手持ち資金 ${yen(s.cash)}）</p>
             </div>
+          </div>
+          <div class="field">
+            <label for="f-account">⑤ 振込先口座</label>
+            <input type="text" id="f-account" name="account" class="text-input" maxlength="100" value="${esc(form.account)}" placeholder="例：どてら銀行 浪速支店 普通 1234567 ナニワ タロウ" autocomplete="off">
           </div>
           <div class="quote" id="quote" aria-live="polite"></div>
           <div class="actions">
@@ -516,7 +541,9 @@
             <button type="button" class="ghost" data-act="refuse">断る</button>
           </div>
         </form>`
-      : `<div class="terms"><p class="empty">貸せるお金がありません（最低${yen(minLend)}）。</p>
+      : `<div class="terms"><p class="empty">${s.day >= s.days
+        ? `今日は最終日（${lastDay()}）なので、初回の期日を期間内に置けず、新しく貸せません。貸すなら上の「期間・目標」から期間を延ばしてください。`
+        : `貸せるお金がありません（振込金額は最低${yen(minLend * (1 - G.CONFIG.maxFeeRatio))}）。`}</p>
           <div class="actions"><button class="ghost" data-act="refuse">断る</button></div></div>`;
 
     return `
@@ -539,11 +566,27 @@
       </article>`;
   }
 
-  // 入力欄とひな形の見た目をフォームの値に合わせる
+  // ③初回の期日と④振込金額は、手で変えるまで①②に合わせて動かす
+  function followTerms() {
+    if (!form.firstTouched && Number.isInteger(form.cycle) && form.cycle >= G.CONFIG.minCycle) {
+      form.firstDue = Math.min(s.days, s.day + G.stepOf(form.cycle));
+      const el = $('#f-first');
+      if (el) el.value = G.isoOf(form.firstDue);
+    }
+    if (!form.transferTouched) {
+      try {
+        form.transfer = G.parseNotation(form.notation).principal;
+        const el = $('#f-transfer');
+        if (el) el.value = form.transfer;
+      } catch (e) { if (!(e instanceof G.GameError)) throw e; /* ①が書きかけのあいだは動かさない */ }
+    }
+  }
+
+  // ±ボタンでSを変えたあと、入力欄と見積もりを合わせる
   function syncTermInputs() {
-    const cy = $('#f-cycle'), rt = $('#f-rate');
+    const cy = $('#f-cycle');
     if (cy) cy.value = form.cycle;
-    if (rt) rt.value = form.ratePct;
+    followTerms();
     updateQuote();
   }
 
@@ -552,42 +595,42 @@
     const c = s && G.visitorOf(s);
     if (!box || !c) return;
     const p = s.people[c.id];
-    const rate = Math.round(form.ratePct * 10), cycle = form.cycle, amount = form.amount;
-    const limit = G.lendLimit(s);
-
-    document.querySelectorAll('#presets [data-act="preset"]').forEach((b) => {
-      b.classList.toggle('on', Number(b.dataset.rate) === rate && Number(b.dataset.cycle) === cycle);
-    });
-    const free = $('#free-chip');
-    if (free) free.classList.toggle('on', !document.querySelector('#presets .on'));
-
-    const K = G.CONFIG;
-    const ok = Number.isInteger(cycle) && cycle >= K.minCycle && cycle <= K.maxCycle
-      && rate >= K.minRate && rate <= K.maxRate && rate % K.rateStep === 0 && form.ratePct * 10 === rate
-      && Number.isInteger(amount) && amount >= K.minLend && amount % K.lendUnit === 0 && amount <= limit;
-    if (!ok) {
-      box.innerHTML = `<p class="verdict bad">貸付額は${yen(K.minLend)}〜${yen(limit)}（${yen(K.lendUnit)}単位）、Sは${K.minCycle}〜${K.maxCycle}、利率は1〜100%（0.5%刻み）で入力してください。</p>`;
+    const note = $('#first-note');
+    if (note) note.textContent = Number.isInteger(form.firstDue) && form.firstDue > s.day ? `${G.fmtDay(form.firstDue)}・今日を1日目として${form.firstDue - s.day + 1}日目` : '';
+    let q;
+    try { q = G.quote(s, form); }
+    catch (e) {
+      if (!(e instanceof G.GameError)) throw e;
+      box.innerHTML = `<p class="verdict bad">${esc(e.message)}</p>`;
       return;
     }
-    const q = G.quote(s, amount, rate, cycle);
-    const [lo, hi] = G.capRange(c, cycle, p.investigated);
+    const [lo, hi] = G.capRange(c, q.cycle, p.investigated);
+    const [flo, fhi] = G.capRange(c, q.firstSpan, p.investigated);
     let cls = 'good', verdict = '余裕あり：ジャンプ金は払えるはず。延滞しにくい条件です。';
     if (q.interest > hi) { cls = 'bad'; verdict = '払えない：ジャンプ金が返済余力を超えています。ほぼ確実に延滞します。'; }
     else if (q.interest > lo) { cls = 'warn'; verdict = 'ぎりぎり：その時の懐具合しだいでジャンプできずに延滞します。'; }
+    let first = '';
+    if (q.firstSpan !== q.cycle && q.interest > flo) {
+      first = `<br>初回は${q.firstSpan}日分しかかき集められないので、初回の目安は${yen(flo)}〜${yen(fhi)}。${q.interest > fhi ? '初回に払えず延滞しそうです。' : '初回は懐具合しだいです。'}`;
+      if (cls === 'good') cls = 'warn';
+    }
+    const label = G.termsLabel(q.rate, q.cycle);
+    const named = label === G.termsDesc(q.rate, q.cycle) ? '' : `・${label}`;
     box.innerHTML = `
+      <p class="receipt">受付表記　<b>${esc(G.receiptOf({ lent: q.principal, payoff0: q.payoff, cycle: q.cycle, firstDue: q.firstDue, transfer: q.transfer, account: q.account }))}</b></p>
       <dl class="quote-grid">
-        <div><dt>条件</dt><dd>${esc(G.termsLabel(rate, cycle))}<small>${G.termsLabel(rate, cycle) === G.termsDesc(rate, cycle) ? '自由設定' : esc(G.termsDesc(rate, cycle))}</small></dd></div>
-        <div><dt>完済金額</dt><dd>${yen(q.payoff)}<small>初回の期日に全部返す場合</small></dd></div>
-        <div><dt>ジャンプ金（1回）</dt><dd>${yen(q.interest)}<small>元金 × ${esc(G.pctText(rate))}</small></dd></div>
-        <div><dt>初回の期日</dt><dd>${G.fmtDay(q.due)}<small>今日を1日目として${cycle}日目</small></dd></div>
-        <div><dt>ジャンプしたら次は</dt><dd>${G.fmtDay(q.nextDue)}<small>間隔は${q.step}日・利息は${cycle}日分</small></dd></div>
-        <div><dt>最終日${lastDay()}までのジャンプ金</dt><dd>${yen(q.expected)}<small>ジャンプし続けて${q.dues}回</small></dd></div>
+        <div><dt>元金 / 完済金</dt><dd>${yen(q.principal)}<small>完済金 ${yen(q.payoff)}（初回の期日に全部返す場合）</small></dd></div>
+        <div><dt>ジャンプ金（1回）</dt><dd>${yen(q.interest)}<small>元金の${esc(G.pctText(q.rate))}${esc(named)}</small></dd></div>
+        <div><dt>振込金額</dt><dd>${yen(q.transfer)}<small>手数料 ${yen(q.fee)} は売上に計上</small></dd></div>
+        <div><dt>初回の期日</dt><dd>${G.fmtDay(q.due)}<small>今日を1日目として${q.firstSpan}日目</small></dd></div>
+        <div><dt>ジャンプしたら次は</dt><dd>${G.fmtDay(q.nextDue)}<small>間隔は${q.step}日・利息は${q.cycle}日分</small></dd></div>
+        <div><dt>最終日までのジャンプ金</dt><dd>${yen(q.expected)}<small>${lastDay()}までジャンプし続けて${q.dues}回</small></dd></div>
         <div><dt>年利換算</dt><dd>${pct(q.apr)}<small>10日あたり${pct(q.per10)}</small></dd></div>
         <div><dt>警察の目 / 夜逃げ</dt><dd>+${q.police}<small>夜逃げ率 +${pct(q.nige)}</small></dd></div>
       </dl>
-      <p class="verdict ${cls}">期日ごとの返済余力の目安：<b>${yen(lo)}〜${yen(hi)}</b>
-        <small>（${p.investigated ? '調査済み・本当の月収から' : '自己申告の月収から。ウソかもしれません'}）</small><br>${verdict}</p>
-      <p class="help">期日は今日を1日目として数え、そのあとは決まった間隔で並びます（遅れて払っても日付はずれません）。入金はジャンプ金に先に充当し、多い分で元金を詰めます。</p>`;
+      <p class="verdict ${cls}">期日ごとの返済余力の目安（${q.cycle}S）：<b>${yen(lo)}〜${yen(hi)}</b>
+        <small>（${p.investigated ? '調査済み・本当の月収から' : '自己申告の月収から。ウソかもしれません'}）</small><br>${verdict}${first}</p>
+      <p class="help">2回目からの期日は、初回から${q.step}日おきに並びます（遅れて払っても日付はずれません）。ジャンプ金は元金残高 × ${esc(G.pctText(q.rate))}で、入金はジャンプ金に先に充当し、多い分で元金を詰めます。</p>`;
   }
 
   function riskOf(loan) {
@@ -602,7 +645,7 @@
     if (s.over) return '<p class="empty">勝負は終わりました。</p>';
     if (!overdue.length) return '<p class="empty">延滞している客はいません。今夜はゆっくり休めます。</p>';
     if (s.nightUsed) return '<p class="empty">今夜はもう動きました。続きは明日の晩です。</p>';
-    return `<p class="help top">夜逃げされると連絡がつかなくなり、期日から2週間を過ぎた締め（15日・月末）で元金が不渡りになります。</p>` + overdue.map((loan) => {
+    return `<p class="help lead">夜逃げされると連絡がつかなくなり、期日から2週間を過ぎた締め（15日・月末）で元金が不渡りになります。</p>` + overdue.map((loan) => {
       const c = G.customerOf(s, loan.customerId);
       const known = s.people[c.id].investigated;
       const cmds = Object.entries(G.COMMANDS).map(([k, cmd]) => {
@@ -665,7 +708,7 @@
         <th>次回期日</th><th>条件</th><th class="num">ジャンプ</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th>調査</th></tr></thead>
       <tbody>${rows.map((r) => {
         const live = r.loans.filter(G.isActive);
-        const terms = live.length ? live.map((l) => esc(G.termsLabel(l.rate, l.cycle))).join('・') : '—';
+        const terms = live.length ? live.map((l) => esc(notationText(l))).join('<br>') : '—';
         return `<tr class="clickable" ${rowAttrs('open-customer', r.c.id)}>
           <td>${esc(r.c.id)}</td>
           <td><b>${esc(r.c.name)}</b><span class="sub">${esc(r.c.kana)}</span></td>
@@ -685,39 +728,42 @@
 
   // ---- カレンダー ----
 
-  const MONTHS = [-1, 0, 1];   // 前月・開始月・翌月
-  function monthOffsetOf(d) {
-    for (const off of MONTHS) {
-      const m = G.monthInfo(off);
-      if (d >= m.firstDay && d < m.firstDay + m.daysInMonth) return off;
-    }
-    return 0;
+  // カレンダーで見られる月：開店前の月〜最終日の翌月（-1 = 開店前の月、0 = 開始月）
+  function months() {
+    const list = [];
+    for (let off = -1; off <= G.monthOffsetOfDay(s.days) + 1; off++) list.push(off);
+    return list;
   }
-  const dateNum = (d) => G.fmtDay(d).split('/')[1].replace(/\(.\)/, '');
+  const monthOffsetOf = (d) => Math.max(-1, Math.min(G.monthOffsetOfDay(s.days) + 1, G.monthOffsetOfDay(d)));
+  const dateNum = (d) => G.dateNumOf(d);
 
   function viewCalendar() {
     const sel = ui.calDay || s.day;
     const m = G.monthInfo(ui.calMonth);
-    const sched = G.schedule(s, G.horizonDay());
+    const sched = G.schedule(s, G.horizonDay(s));
     const only = ui.calCustomer;
     const cells = [];
     for (let i = 0; i < m.lead; i++) cells.push('<div class="cal-cell blank" aria-hidden="true"></div>');
     for (let i = 0; i < m.daysInMonth; i++) cells.push(calCell(m.firstDay + i, sel, sched, only));
     while (cells.length % 7) cells.push('<div class="cal-cell blank" aria-hidden="true"></div>');
     const opts = s.customers.map((c) => `<option value="${esc(c.id)}" ${only === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
-    const tabs = MONTHS.map((off) => {
+    const list = months();
+    const monthOpts = list.map((off) => {
       const x = G.monthInfo(off);
-      return `<button class="month ${ui.calMonth === off ? 'on' : ''}" data-act="cal-month" data-offset="${off}">${x.month}月</button>`;
+      return `<option value="${off}" ${ui.calMonth === off ? 'selected' : ''}>${x.year}年${x.month}月${off === G.monthOffsetOfDay(s.day) ? '（今月）' : ''}</option>`;
     }).join('');
-    const note = ui.calMonth < 0 ? '開店前の月です' : ui.calMonth > 0 ? `最終日${lastDay()}より後は、ジャンプし続けた場合の見込みです。15日と月末は締め日です` : '日付を押すと、その日の入金予定者・貸付した債務者・入金者が一覧で出ます。15日と月末は締め日です';
+    const note = ui.calMonth < 0 ? '開店前の月です'
+      : m.firstDay + m.daysInMonth - 1 > s.days ? `最終日${lastDay()}より後は、ジャンプし続けた場合の見込みです。15日と月末は締め日です`
+      : '日付を押すと、その日の入金予定者・貸付した債務者・入金者が一覧で出ます。15日と月末は締め日です';
     return `
       <div class="cal-layout">
         <section class="panel">
           <header class="panel-h">
-            <button class="ghost small" data-act="cal-month" data-offset="${ui.calMonth - 1}" ${ui.calMonth <= MONTHS[0] ? 'disabled' : ''} aria-label="前の月">‹</button>
+            <button class="ghost small" data-act="cal-month" data-offset="${ui.calMonth - 1}" ${ui.calMonth <= list[0] ? 'disabled' : ''} aria-label="前の月">‹</button>
             <h2>${m.year}年${m.month}月</h2>
-            <button class="ghost small" data-act="cal-month" data-offset="${ui.calMonth + 1}" ${ui.calMonth >= MONTHS[MONTHS.length - 1] ? 'disabled' : ''} aria-label="次の月">›</button>
-            <div class="months">${tabs}</div>
+            <button class="ghost small" data-act="cal-month" data-offset="${ui.calMonth + 1}" ${ui.calMonth >= list[list.length - 1] ? 'disabled' : ''} aria-label="次の月">›</button>
+            <select id="cal-month-select" aria-label="月を選ぶ">${monthOpts}</select>
+            <button class="ghost small" data-act="cal-month" data-offset="${G.monthOffsetOfDay(s.day)}" ${ui.calMonth === G.monthOffsetOfDay(s.day) ? 'disabled' : ''}>今月</button>
             <select id="cal-customer" class="right" aria-label="顧客で絞り込み"><option value="">すべての顧客</option>${opts}</select>
           </header>
           <p class="help cal-note">${note}</p>
@@ -764,6 +810,7 @@
       due, lends, payers, allocs, unknowns, refunds,
       dueSum: sum(due, (x) => x.jump),
       lendSum: sum(lends, (x) => x.t.amount),
+      transferSum: sum(lends, (x) => x.t.transfer),
       inSum: sum(payers, (x) => x.t.amount) + sum(unknowns, (u) => u.amount),
       lateNow: d === s.day ? s.loans.filter((l) => l.status === '延滞' && mine(l.customerId)) : [],
     };
@@ -771,7 +818,7 @@
 
   function calCell(d, sel, sched, only) {
     const wd = G.weekdayOf(d);
-    const state = d < 1 ? 'closed' : d < s.day ? 'past' : d === s.day ? 'today' : d > G.CONFIG.days ? 'proj' : 'future';
+    const state = d < 1 ? 'closed' : d < s.day ? 'past' : d === s.day ? 'today' : d > s.days ? 'proj' : 'future';
     const chips = [];
     let total = 0;
     if (d >= 1 && d <= s.day) {
@@ -866,7 +913,7 @@
     const tag = d < 1 ? '<span class="badge st-断った">開店前</span>'
       : d < s.day ? '<span class="badge st-完済">済み</span>'
       : d === s.day ? '<span class="badge st-来店中">今日</span>'
-      : d > G.CONFIG.days ? '<span class="badge st-返済中">見込み</span>' : '<span class="badge st-返済中">予定</span>';
+      : d > s.days ? '<span class="badge st-返済中">見込み</span>' : '<span class="badge st-返済中">予定</span>';
     const head = `<header class="panel-h"><h2>${G.fmtDayLong(d)}</h2><span class="sub">${d >= 1 ? `${d}日目` : ''}</span>${tag}</header>`;
     if (d < 1) return `${head}<p class="empty">開店前の日です。取引はありません。</p>`;
     const b = dayBook(d, sched, only);
@@ -875,7 +922,7 @@
 
     const summary = `<div class="day-sum">
       <div><span>入金予定者</span><b>${b.due.length}名</b><small>${yen(b.dueSum)}</small></div>
-      <div><span>貸付した債務者</span><b>${b.lends.length}件</b><small>${yen(b.lendSum)}</small></div>
+      <div><span>貸付した債務者</span><b>${b.lends.length}件</b><small>元金 ${yen(b.lendSum)}</small>${b.lends.length ? `<em>振込 ${num(b.transferSum)}／手数料 ${num(b.lendSum - b.transferSum)}</em>` : ''}</div>
       <div><span>入金者</span><b>${b.payers.length + b.unknowns.length}件</b><small class="in">${yen(b.inSum)}</small>
         ${b.inSum ? `<em>ジャンプ ${num(inJump)}／元金 ${num(inPrin)}${inUnk ? `／不明 ${num(inUnk)}` : ''}</em>` : ''}</div>
     </div>`;
@@ -890,9 +937,10 @@
       <tbody>${dueRows}</tbody></table></div>` : `<p class="empty">${future ? 'この日の入金予定はありません。' : 'この日に期日を迎えた客はいません。'}</p>`;
 
     const lendTable = b.lends.length ? `<div class="table-wrap"><table class="data compact">
-      <thead><tr><th>顧客</th><th>貸付</th><th class="num">元金</th><th>条件</th><th>初回期日</th></tr></thead>
-      <tbody>${b.lends.map((x) => `<tr><td>${custLink(x.c)}</td><td>${loanLink(x.loan)}</td><td class="num">${yen(x.t.amount)}</td>
-        <td>${termsCell(x.loan)}</td><td>${dayLink(x.loan.lentDay + G.stepOf(x.loan.cycle))}</td></tr>`).join('')}</tbody></table></div>`
+      <thead><tr><th>顧客</th><th>貸付</th><th>①②</th><th class="num">元金</th><th>③初回</th><th class="num">④振込金額</th><th class="num">手数料（売上）</th><th>⑤振込先口座</th></tr></thead>
+      <tbody>${b.lends.map((x) => `<tr><td>${custLink(x.c)}</td><td>${loanLink(x.loan)}</td><td>${termsCell(x.loan)}</td><td class="num">${yen(x.t.amount)}</td>
+        <td>${dayLink(x.loan.firstDue)}</td><td class="num out">${yen(x.t.transfer)}</td><td class="num in">${x.t.fee ? yen(x.t.fee) : '—'}</td>
+        <td class="wrap">${x.loan.account ? esc(x.loan.account) : '<span class="muted">未入力</span>'}</td></tr>`).join('')}</tbody></table></div>`
       : `<p class="empty">${future ? 'まだ先の日です。' : 'この日の貸付はありません。'}</p>`;
 
     const allocFrom = (t) => {
@@ -921,7 +969,7 @@
 
     let html = `${head}${summary}${G.closingOf(d) ? closingDetailHtml(d, only) : ''}
       <h3 class="sec">入金予定者 <span class="sub">${b.due.length}名・ジャンプ金 計${yen(b.dueSum)}</span></h3>${dueTable}
-      <h3 class="sec">貸付した債務者 <span class="sub">${b.lends.length}件・計${yen(b.lendSum)}</span></h3>${lendTable}
+      <h3 class="sec">貸付した債務者 <span class="sub">${b.lends.length}件・元金 計${yen(b.lendSum)}・振込 計${yen(b.transferSum)}</span></h3>${lendTable}
       <h3 class="sec">入金者 <span class="sub">${b.payers.length + b.unknowns.length}件・計${yen(b.inSum)}</span></h3>${payTable}`;
     if (future) html += '<p class="help">ジャンプ金は、その期日に払わないと延滞になる額です。2回目以降は、それまでジャンプ金だけ入れ続けた場合の見込みです。</p>';
     if (b.lateNow.length) {
@@ -995,7 +1043,7 @@
       <dl class="quote-grid">
         <div><dt>充当前の元金</dt><dd>${yen(loan.principal)}</dd></div>
         <div><dt>充当後の元金</dt><dd>${yen(after)}</dd></div>
-        <div><dt>次のジャンプ金</dt><dd>${yen(G.interestOf(after, loan.rate))}<small>今は${yen(G.nextJumpOf(loan))}</small></dd></div>
+        <div><dt>次のジャンプ金</dt><dd>${yen(G.jumpOf(loan, after))}<small>今は${yen(G.nextJumpOf(loan))}</small></dd></div>
       </dl>
       <p class="verdict good">未払いジャンプ金に先に充当し、多い分で元金を詰めます。手持ち資金は動きません（受付日に受け取り済み）。間違えたら、この充当のあとに同じ貸付の取引がない間は取り消せます。${note}</p>`;
   }
@@ -1060,10 +1108,9 @@
     const fLive = (k) => yen(sum(live, (l) => l[k]));
     return `
       <div class="stat-row eight">
-        <div class="stat"><span>貸付総額（累計）</span><b>${yen(t.lent)}</b></div>
         <div class="stat"><span>貸付総元金</span><b>${yen(t.balance)}</b><em>返済中・延滞・夜逃げ（未計上）の元金</em></div>
         <div class="stat"><span>未払いジャンプ金</span><b>${yen(t.accrued)}</b></div>
-        <div class="stat"><span>ジャンプ金累計（総売上）</span><b class="in">${yen(t.interestPaid)}</b></div>
+        <div class="stat"><span>ジャンプ金累計</span><b class="in">${yen(t.interestPaid)}</b></div>
         <div class="stat"><span>回収済元金</span><b>${yen(t.principalBack)}</b></div>
         <div class="stat"><span>不渡り（計上済み）</span><b class="${t.fuwatari ? 'bad' : ''}">${yen(t.fuwatari)}</b><em>${t.fuwatariCount}件</em></div>
         <div class="stat"><span>夜逃げ（不渡り未計上）</span><b class="${t.fled ? 'bad' : ''}">${yen(t.fled)}</b><em>${t.fledCount}件・締めで不渡りに</em></div>
@@ -1097,7 +1144,7 @@
 
   // 損益（純利）：総売上 − 経費 − 不渡り。経費の内訳・締めの記録・不渡りの予定
   function plPanelHtml() {
-    const p = G.pl(s), goal = G.CONFIG.goal;
+    const p = G.pl(s), goal = s.goal;
     const costRows = Object.entries(G.COSTS).map(([k, label]) => {
       const list = s.costs.filter((c) => c.kind === k);
       return `<tr><td>${label}</td><td class="num">${list.length}件</td><td class="num">${yen(sum(list, (c) => c.amount))}</td></tr>`;
@@ -1109,10 +1156,11 @@
     const nextRow = s.over ? '' : `<tr class="muted-row"><td>${dayLink(plan.day)}<span class="sub">${G.closingOf(plan.day)}・予定</span></td>
       <td class="num">${plan.due.length}件</td><td class="num">${plan.due.length ? yen(sum(plan.due, (l) => l.principal)) : '—'}</td><td colspan="4" class="muted">締めの日の終わりに計上</td></tr>`;
     return `<section class="panel">
-      <header class="panel-h"><h2>損益（純利）</h2><span class="sub">目標：最終日${lastDay()}の締めのあとの純利 ${yen(goal)}</span></header>
+      <header class="panel-h"><h2>損益（純利）</h2><span class="sub">目標：最終日${lastDay()}の締めのあとの純利 ${yen(goal)}</span>
+        <button class="link right" data-act="period-open">期間・目標を変える</button></header>
       ${plLine(p)}
       <div class="stat-row four tight">
-        <div class="stat"><span>総売上（回収したジャンプ金）</span><b class="in">${yen(p.sales)}</b></div>
+        <div class="stat"><span>総売上</span><b class="in">${yen(p.sales)}</b><em>ジャンプ金 ${num(p.jumpSales)}＋振込手数料 ${num(p.feeSales)}</em></div>
         <div class="stat"><span>経費</span><b>${yen(p.expenses)}</b></div>
         <div class="stat"><span>不渡り（締めで計上）</span><b class="${p.fuwatari ? 'bad' : ''}">${yen(p.fuwatari)}</b></div>
         <div class="stat"><span>純利 / 目標</span><b class="${p.net < 0 ? 'bad' : ''}">${signedYen(p.net)}</b><em>目標まで ${yen(Math.max(0, goal - p.net))}</em></div>
@@ -1131,7 +1179,7 @@
       </div>
       <h3 class="sec">不渡りの予定 <span class="sub">夜逃げして連絡がつかない客</span></h3>
       ${plan.due.length || plan.later.length ? fuwatariTableHtml(plan) : '<p class="empty">連絡がつかない客はいません。</p>'}
-      <p class="help">総売上は回収したジャンプ金（利息）の合計で、返ってきた元金は売上に入れません。経費は身辺調査費・罰金・チラシ代。不渡りは、期日から2週間以上遅れて連絡がつかない客の元金を、15日と月末の締めで計上した額です。純利 ＝ 総売上 − 経費 − 不渡り。</p>
+      <p class="help">総売上は回収したジャンプ金（利息）と振込手数料（元金から天引きした分）の合計で、返ってきた元金は売上に入れません。経費は身辺調査費・罰金・チラシ代。不渡りは、期日から2週間以上遅れて連絡がつかない客の元金を、15日と月末の締めで計上した額です。純利 ＝ 総売上 − 経費 − 不渡り。</p>
     </section>`;
   }
 
@@ -1254,11 +1302,14 @@
       ${collectedLine(l.interestPaid, l.lent - l.principal)}
       <h3 class="sec">契約条件</h3>
       <dl class="facts">
+        <dt>受付表記</dt><dd><b>${esc(G.receiptOf(l))}</b></dd>
         <dt>貸付日</dt><dd>${dayLink(l.lentDay)}</dd>
-        <dt>元金</dt><dd>${yen(l.lent)}</dd>
-        <dt>条件</dt><dd>${esc(termsText(l.rate, l.cycle))}</dd>
-        <dt>期日の数え方</dt><dd>当日から換算<small>（期日の間隔は${G.stepOf(l.cycle)}日）</small></dd>
-        <dt>次のジャンプ金</dt><dd>${G.isActive(l) ? `${yen(G.nextJumpOf(l))}<small>（元金残高 ${yen(l.principal)} × ${esc(G.pctText(l.rate))}）</small>` : '—'}</dd>
+        <dt>① 元金-完済金</dt><dd>${esc(G.notationOf(l.lent, l.payoff0))}<small>（元金 ${yen(l.lent)}・完済金 ${yen(l.payoff0)}・利息 ${yen(l.interest0)}＝${esc(rateNote(l))}）</small></dd>
+        <dt>② S</dt><dd>${l.cycle}S<small>（2回目からの期日の間隔は${G.stepOf(l.cycle)}日・当日から換算）</small></dd>
+        <dt>③ 初回の期日</dt><dd>${dayLink(l.firstDue)}<small>（貸付日を1日目として${l.firstDue - l.lentDay + 1}日目）</small></dd>
+        <dt>④ 振込金額</dt><dd>${yen(l.transfer)}<small>（振込手数料 ${yen(l.fee)} は${G.fmtDay(l.lentDay)}に売上に計上）</small></dd>
+        <dt>⑤ 振込先口座</dt><dd>${l.account ? esc(l.account) : '<span class="muted">未入力</span>'}</dd>
+        <dt>次のジャンプ金</dt><dd>${G.isActive(l) ? `${yen(G.nextJumpOf(l))}<small>（元金残高 ${yen(l.principal)} × 利息${num(l.interest0)}/元金${num(l.lent)}）</small>` : '—'}</dd>
         <dt>年利換算</dt><dd>${pct(G.aprOf(l.rate, l.cycle))}<small>10日あたり${pct(G.per10(l.rate, l.cycle))}</small></dd>
         <dt>次回期日</dt><dd>${l.status === '返済中' ? dayLink(l.due) : l.status === '延滞' ? `<span class="bad">延滞${l.overdueDays}日</span>`
           : l.status === '夜逃げ' ? `<span class="bad">連絡不通</span><small>（${G.fmtDay(l.lateSince)}の期日から${G.lateDaysOf(s, l)}日遅れ）</small>` : '—'}</dd>
@@ -1311,10 +1362,48 @@
         <thead><tr><th>客</th><th>最後の状態</th><th class="num">貸した総額</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th class="num">不渡り</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
       <p class="actions" style="margin-top:16px">
-        <button class="primary" data-act="restart">もう一度（別の展開）</button>
+        ${s.over.byTime ? '<button class="primary" data-act="period-open">期間を延ばして続ける</button>' : ''}
+        <button class="${s.over.byTime ? 'ghost' : 'primary'}" data-act="restart">もう一度（別の展開）</button>
         <button class="ghost" data-act="close-result">帳簿を見返す</button>
       </p>`;
     $('#result').hidden = !!ui.resultClosed;
+  }
+
+  // ---- 期間・目標 ----
+
+  function renderPeriod() {
+    const box = $('#period');
+    if (!ui.period || !s) { box.hidden = true; return; }
+    const extending = !!(s.over && s.over.byTime);
+    const ends = G.closingDays(extending ? s.day + 1 : s.day, G.CONFIG.maxDays);
+    if (!ends.includes(ui.period.end)) {
+      // 選べない最終日（延ばすときの今の最終日など）は次の候補にずらす。目標が標準のままなら一緒に合わせる
+      const wasStd = ui.period.goal === G.goalFor(ui.period.end);
+      ui.period.end = ends.find((d) => d >= ui.period.end) || ends[0];
+      if (wasStd) ui.period.goal = G.goalFor(ui.period.end);
+    }
+    const opts = ends.map((d) => `<option value="${d}" ${d === ui.period.end ? 'selected' : ''}>${G.fmtDayLong(d)}（${G.closingOf(d)}・${d}日）</option>`).join('');
+    const std = G.goalFor(ui.period.end);
+    $('#period-body').innerHTML = `
+      <h2>期間・目標</h2>
+      <dl class="facts">
+        <dt>開始日</dt><dd>${G.fmtDayLong(1)}</dd>
+        <dt>今日</dt><dd>${G.fmtDayLong(s.day)}（${s.day}日目）</dd>
+        <dt>今の最終日</dt><dd>${G.fmtDayLong(s.days)}（${s.days}日）</dd>
+        <dt>今の目標</dt><dd>純利 ${yen(s.goal)}</dd>
+      </dl>
+      <form id="period-form" class="terms" novalidate>
+        <div class="field"><label for="period-end">最終日</label>
+          <select id="period-end">${opts}</select>
+          <p class="help">最終日は締め日（15日か月末）から選びます。最後の締めで不渡りを計上してから、純利で勝ち負けを決めるためです。</p></div>
+        <div class="field"><label for="period-goal">目標の純利</label>
+          <span class="unit-input"><input type="number" id="period-goal" min="1" step="100000" value="${Number.isFinite(ui.period.goal) ? ui.period.goal : ''}"><span>円</span></span>
+          <p class="help">この期間の標準は${yen(std)}（1日あたり${yen(G.CONFIG.goalPerDay)}の目安）。<button type="button" class="link" data-act="period-std">標準にする</button></p></div>
+        ${extending ? '<p class="verdict good">期間を延ばすと、いまの結果を取り消して営業を続けます。</p>' : ''}
+        <div class="actions"><button type="submit" class="primary">${extending ? '延ばして続ける' : 'この期間と目標にする'}</button>
+          <button type="button" class="ghost" data-act="period-close">やめる</button></div>
+      </form>`;
+    box.hidden = false;
   }
 
   document.addEventListener('click', (ev) => {

@@ -24,21 +24,31 @@
 //   夜逃げした客は連絡がつかない（連絡不通）。期日から2週間以上遅れていて連絡がつかない客は不渡りにする。
 //   不渡りを引くのは毎月15日と月末の締め。そこで不渡りになった元金を貸付総元金から引く。
 //   それまでは夜逃げした客の元金も貸付総元金に残る（未計上）。
-//   純利 = 総売上（回収したジャンプ金）− 経費（身辺調査・罰金・チラシ代）− 不渡り（元金）。目指すのは純利。
+//   純利 = 総売上（回収したジャンプ金＋振込手数料）− 経費（身辺調査・罰金・チラシ代）− 不渡り（元金）。目指すのは純利。
+//
+// 受付表記（貸付条件）
+//   ①元金-完済金（万円）②S ③初回の期日 ④振込金額 ⑤振込先口座 の5点で決める。
+//   例：①5-6.5 ②10S ③初回11/10 ④振込金額45,000円 → 元金50,000円・完済金65,000円（利息15,000円＝3割）。
+//   元金と振込金額の差（5,000円）は振込手数料として、貸した日に売上に計上する。
+//   元金を詰めたあとのジャンプ金は、元金残高 × 利息/元金（①の比率。円未満切り捨て）。
+//
+// 期間
+//   既定は1年（11/1〜翌年10/31）。最終日は締め日（15日か月末）にして、途中でも自由に延ばせる。
 (function (root) {
   'use strict';
 
   // 金額はすべて円（整数）。台帳CSVの金額は万円で書かれているので、読み込み時に円へ直す。
   const CONFIG = {
-    days: 45,                 // 11/1〜12/15。締め（11/15・11/30・12/15）が3回入り、最終日の12/15も締め日
+    days: 365,                // 既定の期間：11/1〜翌年10/31の1年。最終日は締め日（15日か月末）に限る
+    maxDays: 365 * 5,         // 延ばせる上限
     startDate: '2026-11-01',  // 1日目の日付
     startCash: 1000000,
-    goal: 600000,             // 最終日の締めのあとの純利がこれ以上なら勝ち
+    goalPerDay: 13700,        // 標準の目標の純利 = 1日あたり13,700円 × 日数（1年で500万円、45日で60万円）
     minCycle: 1,              // S の範囲
     maxCycle: 30,
-    minRate: 10,              // 1Sあたりの利率（千分率。10 = 1%、1000 = 100%）
+    minRate: 10,              // 1Sあたりの利息の範囲（千分率。10 = 元金の1%、1000 = 100%）
     maxRate: 1000,
-    rateStep: 5,              // 0.5%刻み
+    maxFeeRatio: 0.2,         // 振込手数料（元金 − 振込金額）の上限。元金の2割まで
     minLend: 10000,
     lendUnit: 1000,
     payUnit: 1000,            // 客は1,000円単位で入金してくる
@@ -73,7 +83,7 @@
     revealMax: 5,
   };
 
-  // よく使う条件。S と利率は自由に決められる。rate は千分率。
+  // 条件の呼び名（トイチなど）。表示の補足に使う。rate は千分率（元金に対する1回の利息）。
   const PRESETS = {
     toichi: { label: 'トイチ', cycle: 10, rate: 100 },
     tosan: { label: 'トサン', cycle: 10, rate: 300 },
@@ -106,7 +116,8 @@
 
   // 取引明細の種類。cash は手持ち資金の増減の向き、pay は貸付への入金（充当）。
   const TX = {
-    lend: { label: '貸付', cash: -1 },
+    lend: { label: '貸付', cash: -1 },                           // お金が出ていくのは振込金額（transfer）
+    fee: { label: '振込手数料（売上）', cash: 0 },              // 元金から天引きした分。貸した日に売上に計上
     accrue: { label: 'ジャンプ金発生', cash: 0 },
     lateAccrue: { label: 'ジャンプ金発生（延滞中）', cash: 0 },
     earlyAccrue: { label: 'ジャンプ金発生（期日前の返済）', cash: 0 },
@@ -155,9 +166,23 @@
     return new Date(Date.UTC(y, m - 1, d + day - 1));
   }
   const weekdayOf = (day) => dateOf(day).getUTCDay();
+  // 開始の年と違う年の日付には年を付ける（期間が年をまたぐので）
   function fmtDay(day) {
     const t = dateOf(day);
-    return `${t.getUTCMonth() + 1}/${t.getUTCDate()}(${WEEK[t.getUTCDay()]})`;
+    const y = t.getUTCFullYear() === Number(CONFIG.startDate.slice(0, 4)) ? '' : `${t.getUTCFullYear()}/`;
+    return `${y}${t.getUTCMonth() + 1}/${t.getUTCDate()}(${WEEK[t.getUTCDay()]})`;
+  }
+  const dateNumOf = (day) => dateOf(day).getUTCDate();
+  const isoOf = (day) => dateOf(day).toISOString().slice(0, 10);   // 2026-11-10（日付の入力欄用）
+  function dayOfIso(iso) {
+    const [y, m, d] = String(iso).split('-').map(Number);
+    if (!y || !m || !d) return NaN;
+    return Math.round((Date.UTC(y, m - 1, d) - dateOf(1)) / 86400000) + 1;
+  }
+  // その日が開始月から何か月目か（0 = 開始月）
+  function monthOffsetOfDay(day) {
+    const t = dateOf(day), [y, m] = CONFIG.startDate.split('-').map(Number);
+    return (t.getUTCFullYear() - y) * 12 + (t.getUTCMonth() + 1 - m);
   }
   // 開始月から offset か月ずらした月（-1 = 前月、1 = 翌月）。firstDay はその月1日のゲーム内の日。
   function monthInfo(offset) {
@@ -170,7 +195,7 @@
       firstDay: Math.round((first - start) / 86400000) + 1,
     };
   }
-  const horizonDay = () => { const n = monthInfo(1); return n.firstDay + n.daysInMonth - 1; }; // 翌月末
+  const horizonDay = (s) => { const n = monthInfo(monthOffsetOfDay(s.days) + 1); return n.firstDay + n.daysInMonth - 1; }; // 最終日の翌月末
 
   function fmtDayLong(day) {
     const t = dateOf(day);
@@ -188,31 +213,79 @@
     while (!closingOf(d)) d++;
     return d;
   }
+  // from〜to の締め日の一覧（期間の最終日の候補）
+  function closingDays(from, to) {
+    const list = [];
+    for (let d = nextClosingDay(from); d <= to; d = nextClosingDay(d + 1)) list.push(d);
+    return list;
+  }
 
   // ---- 貸付条件 ----
 
   const stepOf = (cycle) => Math.max(1, cycle - 1);                  // 期日の間隔（当日から換算）
-  const interestOf = (principal, rate) => Math.floor((principal * rate) / 1000); // ジャンプ金（円未満切り捨て）
+  // ジャンプ金 = 元金残高 × 利息/元金（①の比率。円未満切り捨て）
+  const jumpOf = (loan, principal) => Math.floor(((principal === undefined ? loan.principal : principal) * loan.interest0) / loan.lent);
   const per10 = (rate, cycle) => (rate / 1000) * 10 / cycle;   // 10日あたりに直した利率（ジャンプ金は S 日分）
   const aprOf = (rate, cycle) => (rate / 1000) * 365 / cycle;  // 年利換算（単利・S 日分として）
-  const pctText = (rate) => (rate % 100 === 0 ? `${rate / 100}割` : `${rate / 10}%`);
+  const pctText = (rate) => (Math.abs(rate % 100) < 1e-9 ? `${Math.round(rate / 100)}割` : `${Math.round(rate) / 10}%`);
   const termsDesc = (rate, cycle) => `${cycle}Sで${pctText(rate)}`;
   function termsLabel(rate, cycle) {
-    const preset = Object.values(PRESETS).find((p) => p.rate === rate && p.cycle === cycle);
+    const preset = Object.values(PRESETS).find((p) => Math.abs(p.rate - rate) < 1e-9 && p.cycle === cycle);
     return preset ? preset.label : termsDesc(rate, cycle);
+  }
+
+  // 万円の表記（50000 → "5"、23500 → "2.35"）
+  const manOf = (n) => String(Math.round(n) / 10000);
+  const notationOf = (principal, payoff) => `${manOf(principal)}-${manOf(payoff)}`;
+  // ①「元金-完済金」（万円）を読む。全角や「ー」「〜」も受け付ける
+  function parseNotation(text) {
+    const t = String(text || '').normalize('NFKC').replace(/[\s万円]/g, '').replace(/[ー－−‐–—〜~]/g, '-');
+    const m = t.match(/^(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)$/);
+    if (!m) throw new GameError('①は「元金-完済金」を万円で書いてください（例：5-6.5 は元金50,000円・完済金65,000円）');
+    const [a, b] = [Number(m[1]) * 10000, Number(m[2]) * 10000];
+    if (Math.abs(a - Math.round(a)) > 1e-6 || Math.abs(b - Math.round(b)) > 1e-6) throw new GameError('①の金額は1円単位まで（万円で小数4桁まで）にしてください');
+    return { principal: Math.round(a), payoff: Math.round(b) };
   }
   const policeOf = (rate, cycle) => Math.max(0, Math.round(35 * per10(rate, cycle) - 5.5));
   function rateNige(rate, cycle) {
     const x = Math.max(0, per10(rate, cycle) - 0.1);
     return Math.min(0.5, 1.25 * x * x);
   }
-  function checkTerms(rate, cycle) {
+  // 受付の5項目を確かめて、貸付条件にまとめる。
+  //   input = { notation: '5-6.5', cycle: 10, firstDue: 10（ゲーム内の日）, transfer: 45000, account: '…' }
+  function checkTerms(s, input) {
+    const c = visitorOf(s);
+    if (!c) throw new GameError('来店中の客がいません');
+    const { principal, payoff } = parseNotation(input.notation);
+    const cycle = Number(input.cycle);
+    if (!(principal >= CONFIG.minLend && principal % CONFIG.lendUnit === 0)) {
+      throw new GameError(`①の元金は${yen(CONFIG.minLend)}以上、${yen(CONFIG.lendUnit)}単位にしてください（万円で小数1桁まで）`);
+    }
+    const interest = payoff - principal;
+    if (interest <= 0) throw new GameError('①の完済金は元金より多くしてください（例：5-6.5）');
+    const rate = (1000 * interest) / principal;
+    if (rate < CONFIG.minRate || rate > CONFIG.maxRate) {
+      throw new GameError(`利息（完済金−元金）は元金の${CONFIG.minRate / 10}%〜${CONFIG.maxRate / 10}%にしてください（今は${pctText(rate)}）`);
+    }
     if (!(Number.isInteger(cycle) && cycle >= CONFIG.minCycle && cycle <= CONFIG.maxCycle)) {
-      throw new GameError(`Sは${CONFIG.minCycle}〜${CONFIG.maxCycle}で決めてください`);
+      throw new GameError(`②のSは${CONFIG.minCycle}〜${CONFIG.maxCycle}で決めてください`);
     }
-    if (!(Number.isInteger(rate) && rate >= CONFIG.minRate && rate <= CONFIG.maxRate && rate % CONFIG.rateStep === 0)) {
-      throw new GameError(`利率は${CONFIG.minRate / 10}〜${CONFIG.maxRate / 10}%（0.5%刻み）で決めてください`);
+    const firstDue = Number(input.firstDue);
+    if (!(Number.isInteger(firstDue) && firstDue > s.day && firstDue <= s.days)) {
+      throw new GameError(`③初回の期日は${fmtDay(s.day + 1)}〜${fmtDay(s.days)}（最終日）の間で選んでください`);
     }
+    const transfer = Number(input.transfer);
+    if (!(Number.isInteger(transfer) && transfer >= 1 && transfer <= principal)) {
+      throw new GameError(`④振込金額は1円〜元金（${yen(principal)}）の間にしてください`);
+    }
+    const fee = principal - transfer;
+    const maxFee = Math.floor(principal * CONFIG.maxFeeRatio);
+    if (fee > maxFee) throw new GameError(`手数料（元金−振込金額）は元金の${CONFIG.maxFeeRatio * 10}割（${yen(maxFee)}）までです`);
+    const want = s.people[c.id].want;
+    if (transfer > want) throw new GameError(`④振込金額は希望額（${yen(want)}）までです`);
+    if (transfer > s.cash) throw new GameError(`手持ち資金が足りません（振込金額 ${yen(transfer)}・手持ち ${yen(s.cash)}）`);
+    const account = String(input.account || '').trim().slice(0, 100);
+    return { principal, payoff, interest, rate, cycle, firstDue, transfer, fee, account, notation: notationOf(principal, payoff) };
   }
 
   // ---- 台帳の読み込み ----
@@ -265,7 +338,8 @@
 
   function newGame(customers, seed) {
     const s = {
-      v: 6, day: 0, cash: CONFIG.startCash, sugomi: 1, police: 0, seed: seed >>> 0, unknowns: [], nextUnknownId: 1,
+      v: 7, day: 0, days: CONFIG.days, goal: goalFor(CONFIG.days),
+      cash: CONFIG.startCash, sugomi: 1, police: 0, seed: seed >>> 0, unknowns: [], nextUnknownId: 1,
       costs: [], closings: [],
       customers, people: {}, loans: [], txs: [], visitor: null, nightUsed: false, log: [], over: null,
       nextLoanId: 1, nextTxId: 1,
@@ -296,7 +370,7 @@
   const hasGuarantor = (s, c) => c.guarantor !== 'なし' && !s.people[c.id].guarantorGone;
   const log = (s, kind, text) => s.log.push({ day: s.day, kind, text });
   const owedOf = (loan) => loan.principal + loan.accrued;
-  const nextJumpOf = (loan) => interestOf(loan.principal, loan.rate);
+  const nextJumpOf = (loan) => jumpOf(loan);
 
   // 期日にかき集められる額（1,000円単位）
   function capOf(s, c, cycle) {
@@ -321,8 +395,11 @@
       id: s.nextTxId++, day: s.day, loanId: loan.id, customerId: loan.customerId, type, amount,
       toInterest: (parts && parts.toInterest) || 0, toPrincipal: (parts && parts.toPrincipal) || 0,
       principal: loan.principal, accrued: loan.accrued,
+      ...(type === 'lend' ? { transfer: parts.transfer, fee: parts.fee } : {}),
     });
   }
+  // 取引で手持ち資金がいくら動いたか（貸付は振込金額だけ出ていく）
+  const cashOf = (t) => (t.type === 'lend' ? -t.transfer : TX[t.type].cash * t.amount);
 
   function close(s, loan, status) {
     loan.status = status;
@@ -535,7 +612,8 @@
     const jumpDue = loan.accrued;
     const owed = owedOf(loan);
     if (paid === undefined) {
-      const cap = capOf(s, c, loan.cycle);
+      // 初回は貸した日から初回の期日まで（当日から数えて）の日数分、2回目からは S 日分かき集めてくる
+      const cap = capOf(s, c, loan.due === loan.firstDue ? loan.firstDue - loan.lentDay + 1 : loan.cycle);
       if (cap >= owed) paid = owed;
       else if (cap >= jumpDue) paid = rand(s) < CONFIG.extraPayChance ? cap : jumpDue; // 基本はジャンプ金だけ
       else paid = 0;
@@ -579,45 +657,46 @@
     log(s, 'info', `身辺調査に${yen(CONFIG.investigateCost)}。${c.name}の本当の借金理由は「${c.realReason}」だった。`);
   }
 
+  // 振込できる上限（希望額と手持ち資金の少ないほう）
   function lendLimit(s) {
     const c = visitorOf(s);
-    return c ? floorTo(Math.min(s.people[c.id].want, s.cash), CONFIG.lendUnit) : 0;
+    return c ? Math.max(0, Math.min(s.people[c.id].want, s.cash)) : 0;
   }
 
   // 貸す前の見積もり（画面のプレビュー用）。ジャンプし続けた場合の見込み。
-  function quote(s, amount, rate, cycle) {
-    const interest = interestOf(amount, rate);
-    const step = stepOf(cycle);
-    const due = s.day + step;
+  function quote(s, input) {
+    const t = checkTerms(s, input);
+    const step = stepOf(t.cycle);
     let dues = 0;
-    for (let d = due; d <= CONFIG.days; d += step) dues++;
+    for (let d = t.firstDue; d <= s.days; d += step) dues++;
     return {
-      due, nextDue: due + step, step, interest, payoff: amount + interest, dues, expected: interest * dues,
-      per10: per10(rate, cycle), apr: aprOf(rate, cycle), police: policeOf(rate, cycle), nige: rateNige(rate, cycle),
+      ...t, due: t.firstDue, nextDue: t.firstDue + step, step, dues, expected: t.interest * dues,
+      firstSpan: t.firstDue - s.day + 1,   // 初回の期日までの日数（当日から数えて）
+      per10: per10(t.rate, t.cycle), apr: aprOf(t.rate, t.cycle), police: policeOf(t.rate, t.cycle), nige: rateNige(t.rate, t.cycle),
     };
   }
 
-  function lend(s, amount, rate, cycle) {
+  // 受付表記の1行。①5-6.5 ②10S ③初回11/10 ④振込金額45,000円 ⑤振込先口座
+  const receiptOf = (l) => `①${notationOf(l.lent, l.payoff0)} ②${l.cycle}S ③初回${fmtDay(l.firstDue)} ④振込金額${yen(l.transfer)} ⑤${l.account || '振込先口座は未入力'}`;
+
+  function lend(s, input) {
     const c = visitorOf(s);
-    if (!c) throw new GameError('来店中の客がいません');
-    checkTerms(rate, cycle);
-    const limit = lendLimit(s);
-    if (!(Number.isInteger(amount) && amount >= CONFIG.minLend && amount % CONFIG.lendUnit === 0 && amount <= limit)) {
-      throw new GameError(`貸せるのは${yen(CONFIG.minLend)}〜${yen(limit)}（${yen(CONFIG.lendUnit)}単位）です`);
-    }
-    s.cash -= amount;
-    s.police += policeOf(rate, cycle);
+    const t = checkTerms(s, input);
+    s.cash -= t.transfer;
+    s.police += policeOf(t.rate, t.cycle);
     const loan = {
-      id: s.nextLoanId++, customerId: c.id, lent: amount, principal: amount, accrued: 0, rate, cycle,
-      lentDay: s.day, due: s.day + stepOf(cycle), status: '返済中', overdueDays: 0, lateSince: null, jumps: 0,
+      id: s.nextLoanId++, customerId: c.id, lent: t.principal, principal: t.principal, accrued: 0,
+      interest0: t.interest, payoff0: t.payoff, rate: t.rate, cycle: t.cycle,
+      lentDay: s.day, firstDue: t.firstDue, due: t.firstDue, transfer: t.transfer, fee: t.fee, account: t.account,
+      status: '返済中', overdueDays: 0, lateSince: null, jumps: 0,
       collected: 0, interestPaid: 0, closedDay: null, fuwatari: 0, fuwatariDay: null,
     };
     s.loans.push(loan);
-    tx(s, loan, 'lend', amount);
+    tx(s, loan, 'lend', t.principal, { transfer: t.transfer, fee: t.fee });
+    if (t.fee) tx(s, loan, 'fee', t.fee);
+    s.people[c.id].account = t.account;   // 次に来たときの振込先の初期値
     s.visitor = null;
-    const interest = interestOf(amount, rate);
-    const named = termsLabel(rate, cycle) === termsDesc(rate, cycle) ? termsDesc(rate, cycle) : `${termsLabel(rate, cycle)}（${termsDesc(rate, cycle)}）`;
-    log(s, 'minus', `${c.name}に${yen(amount)}を${named}で貸した。完済金額${yen(amount + interest)}、初回の期日は${fmtDay(loan.due)}（ジャンプ金${yen(interest)}）。`);
+    log(s, 'minus', `${c.name}に貸付。${receiptOf(loan)}。完済金額${yen(t.payoff)}、初回のジャンプ金${yen(t.interest)}。${t.fee ? `手数料${yen(t.fee)}は振込手数料として売上に計上。` : ''}`);
     log(s, 'line', `${c.name}「${c.kuchiguse}」`);
     return loan;
   }
@@ -720,14 +799,38 @@
     const active = s.loans.some(isActive);
     if (s.cash < CONFIG.minLend && !active) s.over = { win: false, reason: '貸す金も、取り立てる相手もいない。どてらい金融、倒産。' };
     else if (s.police >= 100) s.over = { win: false, reason: '警察の目が限界を超えた。ガサ入れで店じまい。' };
-    else if (s.day >= CONFIG.days) {
+    else if (s.day >= s.days) {
       const net = pl(s).net;
-      s.over = net >= CONFIG.goal
-        ? { win: true, reason: `${CONFIG.days}日で純利${yen(net)}。目標の${yen(CONFIG.goal)}を超えた！` }
-        : { win: false, reason: `${CONFIG.days}日で純利${yen(net)}。目標の${yen(CONFIG.goal)}に届かなかった。` };
+      const span = `${fmtDay(1)}〜${fmtDay(s.days)}（${s.days}日）`;
+      s.over = net >= s.goal
+        ? { win: true, byTime: true, reason: `${span}で純利${yen(net)}。目標の${yen(s.goal)}を超えた！` }
+        : { win: false, byTime: true, reason: `${span}で純利${yen(net)}。目標の${yen(s.goal)}に届かなかった。` };
     }
     if (s.over) log(s, s.over.win ? 'plus' : 'bad', s.over.reason);
     else startDay(s);
+  }
+
+  // 期間の標準の目標（1日あたりの目安 × 日数、10万円単位）
+  const goalFor = (days) => Math.max(100000, Math.round((CONFIG.goalPerDay * days) / 100000) * 100000);
+
+  // 期間（最終日）と目標の純利を変える。最終日は締め日に限る（最後の締めで不渡りを計上してから判定するため）。
+  // 期間が終わって結果が出たあとでも、延ばせば営業を続けられる。
+  function setPeriod(s, endDay, goal) {
+    if (!(Number.isInteger(endDay) && closingOf(endDay))) throw new GameError('最終日は15日か月末を選んでください');
+    if (endDay > CONFIG.maxDays) throw new GameError(`最終日は${fmtDay(CONFIG.maxDays)}までにしてください`);
+    const extending = s.over && s.over.byTime;
+    if (s.over && !extending) throw new GameError('店じまいしたので、期間は変えられません');
+    if (endDay < s.day || (extending && endDay <= s.day)) throw new GameError('最終日は今日より後にしてください');
+    if (!(Number.isInteger(goal) && goal >= 1)) throw new GameError('目標の純利は1円以上で決めてください');
+    const before = s.days;
+    s.days = endDay;
+    s.goal = goal;
+    log(s, 'info', `期間を${fmtDayLong(endDay)}まで（${endDay}日）、目標の純利を${yen(goal)}にした（前の最終日は${fmtDay(before)}）。`);
+    if (extending) {
+      s.over = null;
+      log(s, 'info', '期間を延ばして、営業を続ける。');
+      startDay(s);
+    }
   }
 
   // 締め（15日・月末）。期日から2週間以上遅れて連絡がつかない（夜逃げした）客を不渡りにし、元金を貸付総元金から引く
@@ -802,14 +905,16 @@
 
   // ---- 集計（台帳・カレンダー・元金表で使う） ----
 
-  // 損益。純利 = 総売上（回収したジャンプ金）− 経費 − 不渡り（締めで計上した元金）
+  // 損益。純利 = 総売上（回収したジャンプ金＋振込手数料）− 経費 − 不渡り（締めで計上した元金）
   function pl(s) {
-    const sales = s.loans.reduce((a, l) => a + l.interestPaid, 0);
+    const jumpSales = s.loans.reduce((a, l) => a + l.interestPaid, 0);
+    const feeSales = s.loans.reduce((a, l) => a + l.fee, 0);
+    const sales = jumpSales + feeSales;
     const expenses = s.costs.reduce((a, c) => a + c.amount, 0);
     const fuwatari = s.loans.reduce((a, l) => a + l.fuwatari, 0);
     const byKind = {};
     for (const c of s.costs) byKind[c.kind] = (byKind[c.kind] || 0) + c.amount;
-    return { sales, expenses, fuwatari, net: sales - expenses - fuwatari, byKind };
+    return { sales, jumpSales, feeSales, expenses, fuwatari, net: sales - expenses - fuwatari, byKind };
   }
 
   // 次の締めで不渡りになる見込みの貸付（夜逃げして、締めの日に期日から2週間以上たっているもの）
@@ -845,7 +950,7 @@
 
   // これからの期日（ジャンプし続けた場合の見込み）。日付 → 予定の配列。horizon までの日を出す
   function schedule(s, horizon) {
-    const last = horizon || CONFIG.days;
+    const last = horizon || s.days;
     const map = {};
     for (const loan of s.loans) {
       if (loan.status !== '返済中') continue;
@@ -896,7 +1001,9 @@
     totals, schedule, ledger, nigeChance, capRange, owedOf, nextJumpOf, isActive,
     visitorOf, customerOf, loanOf, hasGuarantor,
     fmtDay, fmtDayLong, weekdayOf, termsLabel, termsDesc, pctText, per10, aprOf, policeOf, rateNige,
-    stepOf, interestOf, yen, monthInfo, horizonDay, allocateUnknown, unknownOf, unknownLeft,
+    stepOf, jumpOf, yen, monthInfo, horizonDay, allocateUnknown, unknownOf, unknownLeft,
+    parseNotation, notationOf, manOf, receiptOf, cashOf, setPeriod, goalFor, closingDays,
+    dateNumOf, isoOf, dayOfIso, monthOffsetOfDay,
     canCancelAllocation, cancelAllocation, refundUnknown,
     _settleDue: settleDue,   // 検証用：期日の入金額を指定して処理する
     _earlyPay: earlyPay,     // 検証用：期日前の返済を処理する
