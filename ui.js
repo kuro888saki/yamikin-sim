@@ -126,6 +126,20 @@
     }
   }
 
+  // 書き出したCSVを読み込む。中身を確かめてから、その台帳で最初から始めるか聞く
+  $('#import-file').addEventListener('change', async (ev) => {
+    const file = ev.target.files[0];
+    ev.target.value = '';   // 同じファイルをもう一度選んでも読み込めるように
+    if (!file) return;
+    try {
+      ui.import = { name: file.name, list: G.loadCustomers(await file.text()) };
+    } catch (e) {
+      if (!(e instanceof G.GameError)) throw e;
+      ui.import = { name: file.name, error: e.message };
+    }
+    renderImport();
+  });
+
   $('#csv-file').addEventListener('change', async (ev) => {
     const file = ev.target.files[0];
     if (!file) return;
@@ -240,6 +254,16 @@
     else if (a === 'restart' || a === 'reset') { ui.reset = true; renderReset(); }
     else if (a === 'reset-roster' || a === 'reset-csv') { ui.reset = false; renderReset(); restart(a === 'reset-csv'); }
     else if (a === 'reset-close') { ui.reset = false; renderReset(); }
+    else if (a === 'cust-export') exportCustomers();
+    else if (a === 'cust-import' || a === 'reset-import') { ui.reset = false; renderReset(); $('#import-file').click(); }
+    else if (a === 'import-start') {
+      const imp = ui.import;
+      ui.import = null;
+      renderImport();
+      clearSave();
+      start(imp.list);
+      toast(`${imp.name} の顧客台帳（${imp.list.length}名）で、1日目から始めました`);
+    } else if (a === 'import-close') { ui.import = null; renderImport(); }
     else if (a === 'cust-new') { ui.drawer = { kind: 'customer', id: null, edit: true }; renderDrawer(true); }
     else if (a === 'cust-edit') { ui.drawer = { kind: 'customer', id: el.dataset.id, edit: true }; renderDrawer(true); }
     else if (a === 'cust-cancel') { ui.drawer = ui.drawer.id ? { kind: 'customer', id: ui.drawer.id } : null; renderDrawer(true); }
@@ -259,6 +283,7 @@
     if (ev.key === 'Escape' && ui.alloc) { ui.alloc = null; renderAlloc(); return; }
     if (ev.key === 'Escape' && ui.period) { ui.period = null; renderPeriod(); renderResult(); return; }
     if (ev.key === 'Escape' && ui.reset) { ui.reset = false; renderReset(); return; }
+    if (ev.key === 'Escape' && ui.import) { ui.import = null; renderImport(); return; }
     if (ev.key === 'Escape' && ui.drawer && !ui.drawer.edit) { ui.drawer = null; renderDrawer(); return; }   // 編集中は「やめる」で閉じる
     const el = ev.target;
     if ((ev.key === 'Enter' || ev.key === ' ') && el.getAttribute && el.getAttribute('role') === 'button' && el.tagName !== 'BUTTON') {
@@ -340,6 +365,7 @@
     renderAlloc();
     renderPeriod();
     renderReset();
+    renderImport();
   }
 
   function renderKpis() {
@@ -736,7 +762,11 @@
     return `
       <section class="panel">
         <header class="panel-h"><h2>顧客台帳</h2><span class="sub">${live}名 ・ 行をクリックすると顧客カルテが開きます</span>
-          <button class="primary small right" data-act="cust-new">＋ 顧客を追加</button></header>
+          <span class="btns right">
+            <button class="ghost small" data-act="cust-export" title="編集・追加した項目も含めて、顧客台帳をCSVファイルに保存します">CSVに書き出す</button>
+            <button class="ghost small" data-act="cust-import" title="書き出したCSVを読み込んで、その台帳で最初から始めます">CSVから読み込む</button>
+            <button class="primary small" data-act="cust-new">＋ 顧客を追加</button>
+          </span></header>
         <div class="toolbar">
           <input type="search" id="cust-q" value="${esc(ui.cust.q)}" placeholder="氏名・ふりがな・職業・住所・勤務先・流入元で検索" aria-label="顧客を検索">
           <div class="filters">${chips}</div>
@@ -1477,6 +1507,50 @@
     renderDrawer(true);
   }
 
+  // ---- 顧客台帳のCSV（書き出し・読み込み） ----
+
+  // ファイル名に付ける今の日時（例：2026-10-22_1530）
+  function stamp() {
+    const d = new Date(), z = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}`;
+  }
+
+  function exportCustomers() {
+    const n = G.rosterOf(s).length;
+    const blob = new Blob([G.exportCustomers(s)], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `どてらい金融_顧客台帳_${stamp()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    toast(`顧客台帳（${n}名）をCSVに書き出しました`);
+  }
+
+  function renderImport() {
+    const box = $('#import');
+    if (!ui.import) { box.hidden = true; return; }
+    const { name, list, error } = ui.import;
+    const filled = (c) => [c.address, c.homeAddress, c.workName, c.guarantorContact, c.source, ...c.emergency.map((e) => e.name)].filter(Boolean).length;
+    $('#import-body').innerHTML = error
+      ? `<h2>CSVを読み込めませんでした</h2>
+        <p>${esc(name)}</p>
+        <p class="verdict bad">${esc(error)}</p>
+        <p class="help">「CSVに書き出す」で保存したファイルか、customers.csv と同じ列のファイルを選んでください。</p>
+        <p class="actions"><button class="ghost" data-act="import-close">閉じる</button></p>`
+      : `<h2>CSVから読み込む</h2>
+        <p>${esc(name)}：<b>${list.length}名</b></p>
+        <div class="table-wrap"><table class="data compact">
+          <thead><tr><th>No</th><th>氏名</th><th>職業</th><th>流入元</th><th class="num">記入済みの連絡先など</th><th>メモ</th></tr></thead>
+          <tbody>${list.map((c) => `<tr><td>${esc(c.id)}</td><td>${esc(c.name)}</td><td>${esc(c.job)}</td><td>${c.source ? esc(G.sourceText(c)) : '—'}</td>
+            <td class="num">${filled(c)}項目</td><td>${c.memo ? 'あり' : '—'}</td></tr>`).join('')}</tbody>
+        </table></div>
+        <p class="verdict warn">この台帳で1日目から始めます。今の進み具合（貸付・取引・業務日誌・損益）は消えます。</p>
+        <p class="actions"><button class="primary" data-act="import-start">この台帳で最初から</button><button class="ghost" data-act="import-close">やめる</button></p>`;
+    box.hidden = false;
+  }
+
   // ---- 最初から（顧客台帳を引き継ぐか選ぶ） ----
 
   function renderReset() {
@@ -1493,6 +1567,10 @@
       <div class="choice">
         <button class="ghost" data-act="reset-csv">customers.csv から読み直す</button>
         <span class="help">台帳ファイルの客に戻します。編集・追加した内容は消えます</span>
+      </div>
+      <div class="choice">
+        <button class="ghost" data-act="reset-import">書き出したCSVから読み込む</button>
+        <span class="help">「CSVに書き出す」で保存したファイルの客で始めます</span>
       </div>
       <p class="actions"><button class="ghost" data-act="reset-close">やめる</button></p>`;
     box.hidden = false;

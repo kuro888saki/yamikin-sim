@@ -111,8 +111,15 @@
     weakType: '弱みタイプ', weak: '弱み', weakLine: '弱みを突かれた時の台詞',
     nige: '逃げ足(1-5)', uso: 'ウソつき度(1-5)', kuchiguse: '口癖',
   };
-  const NUMERIC = ['age', 'income', 'want', 'hiddenAmount', 'nige', 'uso'];
-  const MAN = ['income', 'want', 'hiddenAmount'];   // 万円 → 円に直す列
+  const MAN = ['income', 'want', 'hiddenAmount', 'declaredIncome'];   // 万円 → 円に直す列
+  // 顧客カルテで足した項目の列。書き出したCSVに入り、読み込むときはあれば読む（なければ空欄）
+  const EXTRA_COLUMNS = {
+    declaredIncome: '月収・申告(万円)', address: '現住所', homeAddress: '実家の住所', homeContact: '実家の連絡先',
+    workName: '勤務先名', workPhone: '勤務先の電話番号', workAddress: '勤務先の所在地', workHours: '勤務時間', workHoliday: '休日', payday: '給料日',
+    guarantorRelation: '保証人の関係', guarantorContact: '保証人の連絡先',
+    source: '流入元', referrer: '紹介者名', sourceNote: '流入元の補足', memo: 'メモ',
+  };
+  const EM_PARTS = { name: '氏名', relation: '関係', contact: '連絡先' };
 
   const LINES = {
     success: ['しぶしぶ財布を開いた。', '「…分かりました、払います」', '泣きながら小銭まで数えだした。'],
@@ -318,6 +325,16 @@
     return rows.filter((r) => r.some((f) => f.trim() !== ''));
   }
 
+  // 台帳CSVの列の並び：元の19列 → 足した項目（緊急連絡先は保証人のあと）
+  function csvColumns() {
+    const extra = Object.entries(EXTRA_COLUMNS);
+    const at = extra.findIndex(([k]) => k === 'source');
+    const em = [];
+    for (let i = 0; i < EMERGENCY_ROWS; i++) for (const [k, label] of Object.entries(EM_PARTS)) em.push([`em${i}_${k}`, `緊急連絡先${i + 1}の${label}`]);
+    return [...Object.entries(COLUMNS), ...extra.slice(0, at), ...em, ...extra.slice(at)];
+  }
+
+  // 台帳CSVを読む。元の19列は必ず要る。足した項目の列はあれば読む。中身はカルテの編集と同じ決まりで確かめる
   function loadCustomers(text) {
     const rows = parseCSV(text);
     if (rows.length < 2) throw new GameError('台帳に客がいません');
@@ -327,17 +344,36 @@
       idx[key] = head.indexOf(col);
       if (idx[key] < 0) throw new GameError(`台帳に「${col}」の列がありません`);
     }
+    for (const [key, col] of csvColumns()) if (!(key in idx)) idx[key] = head.indexOf(col);
+    const seen = new Set();
     return rows.slice(1).map((r, n) => {
-      const c = {};
-      for (const key in idx) c[key] = (r[idx[key]] || '').trim();
-      for (const key of NUMERIC) {
-        const v = Number(c[key]);
-        if (c[key] === '' || !Number.isFinite(v)) throw new GameError(`台帳${n + 2}行目の「${COLUMNS[key]}」が数字ではありません`);
-        c[key] = MAN.includes(key) ? Math.round(v * 10000) : v;
+      const cell = (key) => (idx[key] >= 0 ? (r[idx[key]] || '').trim() : '');
+      try {
+        const id = cell('id');
+        if (!id) throw new GameError('顧客番号が空です');
+        if (seen.has(id)) throw new GameError(`顧客番号${id}が重複しています`);
+        seen.add(id);
+        const data = {};
+        for (const key of [...Object.keys(PROFILE), ...Object.keys(SECRET)]) data[key] = cell(key);
+        for (const key of MAN) {
+          if (data[key] === '') continue;
+          const v = Number(data[key].normalize('NFKC').replace(/,/g, ''));
+          if (!Number.isFinite(v)) throw new GameError(`「${COLUMNS[key] || EXTRA_COLUMNS[key]}」が数字ではありません`);
+          data[key] = Math.round(v * 10000);
+        }
+        if (data.guarantor === 'なし') data.guarantor = '';
+        if (data.declaredIncome === '') {
+          // 申告の月収の列がなければ、ウソつきほど月収を盛って申告する
+          const income = readField(SECRET.income, data.income), uso = readField(SECRET.uso, data.uso);
+          data.declaredIncome = floorTo(income * (1 + (uso - 1) * 0.25), 1000);
+        }
+        data.emergency = [];
+        for (let i = 0; i < EMERGENCY_ROWS; i++) data.emergency.push({ name: cell(`em${i}_name`), relation: cell(`em${i}_relation`), contact: cell(`em${i}_contact`) });
+        return normalizeCustomer({ id, ...readCustomer(data, true), memo: cell('memo').slice(0, 2000) });
+      } catch (e) {
+        if (e instanceof GameError) throw new GameError(`台帳${n + 2}行目：${e.message}`);
+        throw e;
       }
-      // ウソつきほど月収を盛って申告する
-      c.declaredIncome = floorTo(c.income * (1 + (c.uso - 1) * 0.25), 1000);
-      return normalizeCustomer(c);
     });
   }
 
@@ -470,7 +506,7 @@
     customers.forEach((c, i) => {
       s.people[c.id] = {
         nextVisit: days[i], want: c.want, investigated: false, hiddenUsed: false,
-        guarantorGone: false, refused: false, visits: 0, memo: '',
+        guarantorGone: false, refused: false, visits: 0, memo: c.memo || '',
       };
     });
     startDay(s);
@@ -988,8 +1024,30 @@
     log(s, 'info', `${c.name}（No.${id}）を顧客台帳に戻した。`);
   }
 
-  // 「最初から」で引き継ぐ顧客台帳（台帳から外した客は除く）
-  const rosterOf = (s) => JSON.parse(JSON.stringify(s.customers.filter((c) => !c.deleted)));
+  // 「最初から」と書き出しで使う顧客台帳（台帳から外した客は除く）。希望額とメモはカルテに出ている今の値
+  function rosterOf(s) {
+    return s.customers.filter((c) => !c.deleted).map((c) => {
+      const p = s.people[c.id];
+      return { ...JSON.parse(JSON.stringify(c)), want: p ? p.want : c.want, memo: p ? p.memo || '' : c.memo || '' };
+    });
+  }
+
+  // 顧客台帳をCSVにする（customers.csv と同じ形＋足した項目の列。Excelでも開けるようBOMと改行CRLF）
+  const csvCell = (v) => { const t = String(v == null ? '' : v); return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  function exportCustomers(s) {
+    const cols = csvColumns();
+    const lines = [cols.map(([, h]) => csvCell(h)).join(',')];
+    for (const c of rosterOf(s)) {
+      lines.push(cols.map(([k]) => {
+        const em = k.match(/^em(\d+)_(\w+)$/);
+        if (em) return csvCell(c.emergency[Number(em[1])][em[2]]);
+        if (k === 'guarantor') return csvCell(c.guarantor || 'なし');
+        if (MAN.includes(k)) return csvCell(manOf(c[k]));
+        return csvCell(c[k]);
+      }).join(','));
+    }
+    return `\uFEFF${lines.join('\r\n')}\r\n`;
+  }
 
   // 前の版の保存データを今の形にそろえる
   function migrate(s) {
@@ -1249,7 +1307,7 @@
     CONFIG, PRESETS, COMMANDS, TX, GameError, parseCSV, loadCustomers, newGame,
     investigate, lend, lendLimit, quote, refuse, collect, setMemo, endDay, skipToNext, agendaOf,
     PROFILE, SECRET, EMERGENCY_ROWS, SOURCES, WEAK_TYPES, sourceText, updateCustomer, addCustomer,
-    canDeleteCustomer, deleteCustomer, restoreCustomer, rosterOf, migrate,
+    canDeleteCustomer, deleteCustomer, restoreCustomer, rosterOf, migrate, exportCustomers,
     COSTS, pl, fuwatariPlan, closingOf, nextClosingDay, lateDaysOf, fuwatariDayOf, onBooks,
     totals, schedule, ledger, nigeChance, capRange, owedOf, nextJumpOf, isActive,
     visitorOf, customerOf, loanOf, hasGuarantor,

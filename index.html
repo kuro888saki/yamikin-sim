@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>どてらい金融 顧客管理システム</title>
-  <link rel="stylesheet" href="style.css?v=10">
+  <link rel="stylesheet" href="style.css?v=11">
 </head>
 <body>
   <header class="top">
@@ -48,6 +48,11 @@
     <div class="sheet" id="reset-body" role="dialog" aria-modal="true" aria-label="最初から"></div>
   </div>
 
+  <div class="overlay" id="import" hidden>
+    <div class="sheet" id="import-body" role="dialog" aria-modal="true" aria-label="CSVから読み込む"></div>
+  </div>
+  <input type="file" id="import-file" accept=".csv,text/csv" hidden>
+
   <div class="overlay" id="loader" hidden>
     <div class="sheet">
       <h2>台帳を読み込めませんでした</h2>
@@ -61,7 +66,7 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="logic.js?v=10"></script>
-  <script src="ui.js?v=10"></script>
+  <script src="logic.js?v=11"></script>
+  <script src="ui.js?v=11"></script>
 </body>
 </html>
