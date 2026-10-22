@@ -36,7 +36,8 @@
 //   既定は1年（11/1〜翌年10/31）。最終日は締め日（15日か月末）にして、途中でも自由に延ばせる。
 //
 // 早送り
-//   予定（来店・期日・締め・延滞）のない日を続けて終え、次に予定がある日で止める。
+//   予定（来店・延滞が出た期日・締め・延滞中の客）のない日を続けて終え、次に予定がある日で止める。
+//   期日でも、客がジャンプ・完済したときは止まらない（入金は業務日誌と、飛ばした日のまとめに出る）。
 //
 // 顧客カルテ
 //   基本情報・勤務先・保証人・緊急連絡先（3名）・流入元などを自由に書き換えられる。顧客の追加と削除もできる。
@@ -1380,14 +1381,14 @@
     else startDay(s);
   }
 
-  // 今日の予定（早送りが止まる理由）：来店・期日（入金や延滞の結果が出た日）・締め日・延滞中の客
-  const DUE_TX = ['accrue', 'lateAccrue', 'jump', 'jumpPlus', 'payoff', 'partial', 'overdue'];
+  // 今日の予定（早送りが止まる理由）：来店・延滞が出た（期日に払えなかった）・締め日・延滞中の客。
+  // 期日に客がジャンプ・完済しただけの日は止まらない
   function agendaOf(s) {
     const list = [];
     if (s.visitor) list.push('来店');
-    if (s.txs.some((t) => t.day === s.day && DUE_TX.includes(t.type))) list.push('期日');
+    if (s.txs.some((t) => t.day === s.day && t.type === 'overdue' && !t.canceled)) list.push('延滞が出た');
     if (closingOf(s.day)) list.push('締め');
-    if (s.loans.some((l) => l.status === '延滞')) list.push('延滞');
+    if (!list.includes('延滞が出た') && s.loans.some((l) => l.status === '延滞')) list.push('延滞');
     return list;
   }
 

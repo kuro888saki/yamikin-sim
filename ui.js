@@ -503,7 +503,7 @@
     btn.disabled = !!s.visitor;
     const skip = $('#skip');
     skip.disabled = !!s.visitor || !!s.over || s.day >= s.days;
-    skip.title = overdue ? '延滞客がいる間は、早送りしても1日ずつ進みます' : '予定（来店・期日・締め・延滞）のない日を飛ばして、次に予定がある日まで進めます';
+    skip.title = overdue ? '延滞客がいる間は、早送りしても1日ずつ進みます' : '来店・延滞が出た期日・締め・延滞中の客のない日を飛ばして進めます（客がジャンプ・完済しただけの期日では止まりません）';
     btn.textContent = s.over ? '結果をもう一度見る' : s.day >= s.days ? '勝負の結果を見る ▶' : '1日を終える ▶';
     let hint = `${G.fmtDayLong(s.day)}`;
     if (s.visitor) hint = '来店した客に、貸すか断るかを決めてください（本日の業務）';
