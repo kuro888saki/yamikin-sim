@@ -534,7 +534,9 @@
     const todayTx = s.txs.filter((t) => t.day === s.day && !t.canceled);   // 取り消した取引は数えない
     const todayUnk = sum(s.unknowns.filter((u) => u.day === s.day), (u) => u.amount);
     const inflow = sum(todayTx.filter((t) => txSign(t) > 0), (t) => t.amount) + todayUnk;
-    const outflow = sum(todayTx.filter((t) => txSign(t) < 0), (t) => -G.cashOf(t));   // 貸付は振込金額
+    const todayLends = todayTx.filter((t) => t.type === 'lend');
+    const lentToday = sum(todayLends, (t) => t.amount);          // 本日の貸付は貸付元金で数える
+    const transferToday = sum(todayLends, (t) => t.transfer);    // そのうち実際に振り込んだ額
     const todayLate = sum(todayTx.filter((t) => txSign(t) > 0), (t) => t.toLateFee || 0);
     const dueToday = todayTx.filter((t) => ['jump', 'jumpPlus', 'payoff', 'overdue'].includes(t.type)).length;
     const overdue = s.loans.filter((l) => l.status === '延滞').length;
@@ -558,7 +560,8 @@
       <div class="stat-row">
         <div class="stat clickable" data-act="tab" data-view="payments" title="入金台帳で見る"><span>本日の入金</span><b class="in">${yen(inflow)}</b>
           ${inflow ? `<em>${todayLate ? `延滞金 ${num(todayLate)}＋` : ''}ジャンプ ${num(sum(todayTx.filter((t) => txSign(t) > 0), (t) => t.toInterest))}＋元金 ${num(sum(todayTx.filter((t) => txSign(t) > 0), (t) => t.toPrincipal))}${todayUnk ? `＋不明 ${num(todayUnk)}` : ''}</em>` : ''}</div>
-        <div class="stat"><span>本日の貸付</span><b class="out">${yen(outflow)}</b></div>
+        <div class="stat"><span>本日の貸付</span><b class="out">${yen(lentToday)}</b>
+          ${todayLends.length ? `<em>元金 ${todayLends.length}件・振込 ${num(transferToday)}${lentToday > transferToday ? `＋手数料 ${num(lentToday - transferToday)}` : ''}</em>` : ''}</div>
         <div class="stat"><span>本日期日の客</span><b>${dueToday}件</b></div>
         <div class="stat"><span>延滞中</span><b class="${overdue ? 'bad' : ''}">${overdue}件</b></div>
       </div>
