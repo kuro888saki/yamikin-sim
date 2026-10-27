@@ -1,4 +1,4 @@
-// どてらい金融 顧客管理システム — 画面の描画と操作。計算は logic.js（window.Game）に任せる。
+// 小口金融 顧客管理システム — 画面の描画と操作。計算は logic.js（window.Game）に任せる。
 (function () {
   'use strict';
   const G = window.Game;
@@ -2007,7 +2007,7 @@
     const blob = new Blob([G.exportCustomers(s)], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `どてらい金融_顧客台帳_${stamp()}.csv`;
+    a.download = `小口金融_顧客台帳_${stamp()}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();

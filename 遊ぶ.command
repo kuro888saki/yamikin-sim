@@ -1,5 +1,5 @@
 #!/bin/zsh
-# どてらい金融をブラウザで起動する。ダブルクリックで動く。終わったらこのウィンドウを閉じる。
+# 小口金融をブラウザで起動する。ダブルクリックで動く。終わったらこのウィンドウを閉じる。
 cd "$(dirname "$0")"
 PORT=8750
 if lsof -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
@@ -8,7 +8,7 @@ if lsof -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
   exit 0
 fi
 (sleep 1; open "http://127.0.0.1:$PORT/") &
-echo "どてらい金融を起動しました。遊び終わったらこのウィンドウを閉じてください。"
+echo "小口金融を起動しました。遊び終わったらこのウィンドウを閉じてください。"
 # ブラウザに古いファイルを覚えさせない（更新したあとも必ず新しい中身で動くように）
 python3 - "$PORT" <<'PY'
 import http.server, sys

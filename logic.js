@@ -1,4 +1,4 @@
-// どてらい金融 — ゲームの計算部分。画面には触らない（ブラウザとNodeの両方で動く）。
+// 小口金融 — ゲームの計算部分。画面には触らない（ブラウザとNodeの両方で動く）。
 //
 // 用語
 //   S          … 支払いサイクル。10日サイクルは 10S。
@@ -140,7 +140,7 @@
     success: ['しぶしぶ財布を開いた。', '「…分かりました、払います」', '泣きながら小銭まで数えだした。'],
     fail: ['居留守を使われた。テレビの音だけ聞こえる。', 'のらりくらりとかわされた。', '話の途中でトイレに逃げられた。'],
     nakiotoshi: 'あなたは玄関先で、自分の苦労話を涙ながらに語りはじめた。',
-    aisatsu: 'あなたはアパート中に響く声で「どてらい金融でーす！ 毎度おおきに！」とあいさつした。',
+    aisatsu: 'あなたはアパート中に響く声で「小口金融でーす！ 毎度おおきに！」とあいさつした。',
   };
 
   // 取引明細の種類。cash は手持ち資金の増減の向き、pay は貸付への入金（充当）。
@@ -1501,7 +1501,7 @@
     if (closingOf(s.day)) closeBooks(s);
 
     const active = s.loans.some(isActive);
-    if (s.cash < CONFIG.minLend && !active) s.over = { win: false, reason: '貸す金も、取り立てる相手もいない。どてらい金融、倒産。' };
+    if (s.cash < CONFIG.minLend && !active) s.over = { win: false, reason: '貸す金も、取り立てる相手もいない。小口金融、倒産。' };
     else if (s.police >= 100) s.over = { win: false, reason: '警察の目が限界を超えた。ガサ入れで店じまい。' };
     else if (s.day >= s.days) {
       const net = pl(s).net;
