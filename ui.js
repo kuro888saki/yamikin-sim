@@ -30,7 +30,20 @@
   const num = (n) => Math.round(n).toLocaleString('ja-JP');
   const yen = (n) => `${num(n)}円`;
   const pct = (x) => `${(Math.round(x * 1000) / 10).toLocaleString('ja-JP', { maximumFractionDigits: 1 })}%`;
-  const stars = (n) => '★'.repeat(n) + '☆'.repeat(5 - n);
+  // 線アイコン。Lucide Icons（ISC License・https://lucide.dev/license）の SVG をそのまま埋め込む（外部から読み込まない）
+  const ICONS = {
+    x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    'chevron-left': '<path d="m15 18-6-6 6-6"/>',
+    'chevron-right': '<path d="m9 18 6-6-6-6"/>',
+    'chevrons-right': '<path d="m6 17 5-5-5-5"/><path d="m13 17 5-5-5-5"/>',
+    'arrow-right': '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+    plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+    minus: '<path d="M5 12h14"/>',
+    star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  };
+  const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
+  // 5段階。付いている分は塗り、残りは薄い線
+  const stars = (n) => `<span class="stars" role="img" aria-label="5段階中${n}">${[1, 2, 3, 4, 5].map((i) => icon('star', i <= n ? 'on' : 'off')).join('')}</span>`;
   const badge = (status) => `<span class="badge st-${esc(status)}">${esc(status)}</span>`;
   const sum = (arr, f) => arr.reduce((a, x) => a + f(x), 0);
   const rowAttrs = (act, id) => `data-act="${act}" data-id="${esc(id)}" tabindex="0" role="button"`;
@@ -520,7 +533,7 @@
     const skip = $('#skip');
     skip.disabled = !!s.visitor || !!s.over || s.day >= s.days;
     skip.title = overdue ? '延滞客がいる間は、早送りしても1日ずつ進みます' : '来店・延滞が出た期日・締め・延滞中の客のない日を飛ばして進めます（客がジャンプ・完済しただけの期日では止まりません）';
-    btn.textContent = s.over ? '結果をもう一度見る' : s.day >= s.days ? '勝負の結果を見る ▶' : '1日を終える ▶';
+    btn.innerHTML = s.over ? '結果をもう一度見る' : `${s.day >= s.days ? '勝負の結果を見る' : '1日を終える'}${icon('arrow-right')}`;
     let hint = `${G.fmtDayLong(s.day)}`;
     if (s.visitor) hint = '来店した客に、貸すか断るかを決めてください（本日の業務）';
     else if (overdue && !s.nightUsed) hint = '延滞客がいます。取り立てずに終えることもできます（延滞客がいる間は、早送りも1日ずつ）';
@@ -581,7 +594,7 @@
           </section>
           <section class="panel">
             <header class="panel-h"><h2>本日の入金</h2><span class="sub">${G.fmtDay(s.day)}</span>
-              <span class="btns right"><button class="ghost small" data-act="pay-new">＋ 入金を記録</button><button class="link" data-act="tab" data-view="payments">入金台帳で見る</button></span></header>
+              <span class="btns right"><button class="ghost small" data-act="pay-new">${icon('plus')}入金を記録</button><button class="link" data-act="tab" data-view="payments">入金台帳で見る</button></span></header>
             ${paymentsTableHtml(paymentRows().filter((r) => r.day === s.day), true)}
           </section>
         </div>
@@ -608,7 +621,7 @@
     if (!open.length) return '';
     const known = open.filter((u) => u.revealed);
     return `<section class="panel notice">
-      <header class="panel-h"><h2>要対応：不明入金</h2><span class="sub">未充当 ${open.length}件・${yen(sum(open, G.unknownLeft))}${known.length ? `（うち持ち主が判明 ${known.length}件）` : ''}</span>
+      <header class="panel-h"><h2>不明入金</h2><span class="sub">未充当 ${open.length}件・${yen(sum(open, G.unknownLeft))}${known.length ? `（うち持ち主が判明 ${known.length}件）` : ''}</span>
         <button class="link right" data-act="tab" data-view="loans">元金表で一覧を見る</button></header>
       ${unknownTableHtml(open)}
     </section>`;
@@ -694,7 +707,6 @@
     const canLend = limit >= minLend * (1 - G.CONFIG.maxFeeRatio) && s.day < s.days;
     const terms = canLend
       ? `<form id="terms" class="terms" novalidate>
-          <p class="help lead">受付表記の5項目を入力します（例：①5-6.5 ②10S ③初回11/10 ④振込金額45,000円 ⑤振込先口座）。</p>
           <div class="field two">
             <div>
               <label for="f-notation">① 元金-完済金（万円）</label>
@@ -704,10 +716,10 @@
             <div>
               <label for="f-cycle">② S（支払いサイクル）</label>
               <div class="stepper">
-                <button type="button" data-act="step" data-d="-1" aria-label="Sを1減らす">−</button>
+                <button type="button" data-act="step" data-d="-1" aria-label="Sを1減らす">${icon('minus')}</button>
                 <input type="number" id="f-cycle" name="cycle" min="${G.CONFIG.minCycle}" max="${G.CONFIG.maxCycle}" step="1" value="${form.cycle}">
                 <span>S</span>
-                <button type="button" data-act="step" data-d="1" aria-label="Sを1増やす">＋</button>
+                <button type="button" data-act="step" data-d="1" aria-label="Sを1増やす">${icon('plus')}</button>
               </div>
             </div>
           </div>
@@ -837,7 +849,7 @@
     if (s.over) return '<p class="empty">勝負は終わりました。</p>';
     if (!overdue.length) return '<p class="empty">延滞している客はいません。今夜はゆっくり休めます。</p>';
     if (s.nightUsed) return '<p class="empty">今夜はもう動きました。続きは明日の晩です。</p>';
-    return `<p class="help lead">夜逃げされると連絡がつかなくなり、期日から2週間を過ぎた締め（15日・月末）で元金が不渡りになります。</p>` + overdue.map((loan) => {
+    return overdue.map((loan) => {
       const c = G.customerOf(s, loan.customerId);
       const known = s.people[c.id].investigated;
       const cmds = Object.entries(G.COMMANDS).map(([k, cmd]) => {
@@ -882,11 +894,11 @@
     const sorts = Object.entries(CUST_SORTS).map(([k, [label]]) => `<option value="${k}" ${ui.cust.sort === k ? 'selected' : ''}>${label}</option>`).join('');
     return `
       <section class="panel">
-        <header class="panel-h"><h2>顧客台帳</h2><span class="sub">${live}名 ・ 行をクリックすると顧客カルテが開きます</span>
+        <header class="panel-h"><h2>顧客台帳</h2><span class="sub">${live}名</span>
           <span class="btns right">
             <button class="ghost small" data-act="cust-export" title="編集・追加した項目も含めて、顧客台帳をCSVファイルに保存します">CSVに書き出す</button>
             <button class="ghost small" data-act="cust-import" title="書き出したCSVを読み込んで、その台帳で最初から始めます">CSVから読み込む</button>
-            <button class="primary small" data-act="cust-new">＋ 顧客を追加</button>
+            <button class="primary small" data-act="cust-new">${icon('plus')}顧客を追加</button>
           </span></header>
         <div class="toolbar">
           <input type="search" id="cust-q" value="${esc(ui.cust.q)}" placeholder="氏名・ふりがな・職業・住所・勤務先・流入元で検索" aria-label="顧客を検索">
@@ -959,19 +971,19 @@
     }).join('');
     const note = ui.calMonth < 0 ? '開店前の月です'
       : m.firstDay + m.daysInMonth - 1 > s.days ? `最終日${lastDay()}より後は、ジャンプし続けた場合の見込みです。15日と月末は締め日です`
-      : '日付を押すと、その日の入金予定者・貸付した債務者・入金者が一覧で出ます。15日と月末は締め日です';
+      : '';
     return `
       <div class="cal-layout">
         <section class="panel">
           <header class="panel-h">
-            <button class="ghost small" data-act="cal-month" data-offset="${ui.calMonth - 1}" ${ui.calMonth <= list[0] ? 'disabled' : ''} aria-label="前の月">‹</button>
+            <button class="ghost small" data-act="cal-month" data-offset="${ui.calMonth - 1}" ${ui.calMonth <= list[0] ? 'disabled' : ''} aria-label="前の月">${icon('chevron-left')}</button>
             <h2>${m.year}年${m.month}月</h2>
-            <button class="ghost small" data-act="cal-month" data-offset="${ui.calMonth + 1}" ${ui.calMonth >= list[list.length - 1] ? 'disabled' : ''} aria-label="次の月">›</button>
+            <button class="ghost small" data-act="cal-month" data-offset="${ui.calMonth + 1}" ${ui.calMonth >= list[list.length - 1] ? 'disabled' : ''} aria-label="次の月">${icon('chevron-right')}</button>
             <select id="cal-month-select" aria-label="月を選ぶ">${monthOpts}</select>
             <button class="ghost small" data-act="cal-month" data-offset="${G.monthOffsetOfDay(s.day)}" ${ui.calMonth === G.monthOffsetOfDay(s.day) ? 'disabled' : ''}>今月</button>
             <select id="cal-customer" class="right" aria-label="顧客で絞り込み"><option value="">すべての顧客</option>${opts}</select>
           </header>
-          <p class="help cal-note">${note}</p>
+          ${note ? `<p class="help cal-note">${note}</p>` : ''}
           <div class="cal-legend"><span class="chip due">入金予定（ジャンプ金）</span><span class="chip in">入金</span><span class="chip out">貸付</span><span class="chip unk">不明入金</span><span class="chip bad">延滞・夜逃げ</span><span class="chip closing">締め（15日・月末）</span></div>
           <div class="cal-grid">
             ${['日', '月', '火', '水', '木', '金', '土'].map((w, i) => `<div class="cal-w ${i === 0 ? 'sun' : i === 6 ? 'sat' : ''}">${w}</div>`).join('')}
@@ -1051,7 +1063,7 @@
       <span class="cal-top"><span class="cal-date">${dateNum(d)}</span>${d === s.day ? '<span class="today-tag">今日</span>' : ''}</span>
       <span class="cal-items">${chips.join('')}</span>
       ${total ? `<span class="cal-total">計 ${yen(total)}</span>` : ''}
-      <span class="cal-dots" aria-hidden="true">${chips.length ? '●'.repeat(Math.min(chips.length, 3)) : ''}</span>
+      <span class="cal-dots" aria-hidden="true">${chips.length ? `${chips.length}件` : ''}</span>
     </button>`;
   }
 
@@ -1124,9 +1136,9 @@
     return `
       <header class="drawer-h">
         <div><span class="no">カレンダー ・ ${d >= 1 ? `${d}日目` : '開店前'}</span><h2>${G.fmtDayLong(d)}</h2></div>
-        <button class="ghost small" data-act="day-prev" aria-label="前の日">‹ 前の日</button>
-        <button class="ghost small" data-act="day-next" aria-label="次の日">次の日 ›</button>
-        <button class="close" data-act="close-drawer" aria-label="閉じる">×</button>
+        <button class="ghost small" data-act="day-prev" aria-label="前の日">${icon('chevron-left')}前の日</button>
+        <button class="ghost small" data-act="day-next" aria-label="次の日">次の日${icon('chevron-right')}</button>
+        <button class="close" data-act="close-drawer" aria-label="閉じる">${icon('x')}</button>
       </header>
       ${dayDetailHtml(d, sched, ui.calCustomer, true)}`;
   }
@@ -1314,7 +1326,7 @@
         <td class="num">${yen(a.cost)}</td><td>${a.offset ? '返済に充てた' : '現金で渡した'}</td><td>${state}</td><td>${btns}</td></tr>`;
     }).join('');
     return `<section class="panel">
-      <header class="panel-h"><h2>口座の在庫・転売</h2><span class="sub">延滞客から買い取った銀行口座 ・ 在庫 ${stock.length}件（買取額 計${yen(sum(stock, (a) => a.cost))}）</span></header>
+      <header class="panel-h"><h2>口座の在庫</h2><span class="sub">${stock.length}件・買取額 計${yen(sum(stock, (a) => a.cost))}</span></header>
       <div class="table-wrap"><table class="data compact">
         <thead><tr><th>買取日</th><th>客</th><th class="num">買取額</th><th>代金</th><th>状態</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table></div>
@@ -1383,8 +1395,8 @@
         <div class="stat"><span>うち不明入金</span><b class="${unk ? 'unk' : ''}">${yen(unk)}</b><em>充当は元金表・カレンダーから</em></div>
       </div>
       <section class="panel">
-        <header class="panel-h"><h2>入金台帳</h2><span class="sub">客からの入金と不明入金の一覧 ・ 新しい順</span>
-          <button class="primary small right" data-act="pay-new">＋ 入金を記録</button></header>
+        <header class="panel-h"><h2>入金台帳</h2>
+          <button class="primary small right" data-act="pay-new">${icon('plus')}入金を記録</button></header>
         <div class="toolbar">
           <select id="pay-month" aria-label="月で絞り込み"><option value="all">すべての月</option>${monthOpts}</select>
           <select id="pay-cust" aria-label="顧客で絞り込み"><option value="">すべての顧客</option>${custOpts}</select>
@@ -1453,7 +1465,7 @@
         <div class="stat"><span>不明入金（預かり）</span><b class="${t.unknownHeld ? 'unk' : ''}">${yen(t.unknownHeld)}</b></div>
       </div>
       <section class="panel">
-        <header class="panel-h"><h2>元金表</h2><span class="sub">貸付ごとの元金とジャンプ金 ・ 行をクリックすると取引明細が開きます</span></header>
+        <header class="panel-h"><h2>元金表</h2></header>
         ${collectedLine(t.interestPaid, t.principalBack)}
         <div class="toolbar">
           <div class="filters">${chips}</div>
@@ -1473,7 +1485,7 @@
       </section>
       ${plPanelHtml()}
       <section class="panel">
-        <header class="panel-h"><h2>不明入金（仮受金）</h2><span class="sub">誰からかわからない入金。持ち主がわかったら「充当する」で貸付に充てます。充当するまでは自分のお金ではないので、純利にも数えません</span></header>
+        <header class="panel-h"><h2>不明入金</h2><span class="sub">仮受金</span></header>
         ${unknownTableHtml(s.unknowns.slice().reverse())}
       </section>
       ${accountsHtml()}`;
@@ -1493,7 +1505,7 @@
     const nextRow = s.over ? '' : `<tr class="muted-row"><td>${dayLink(plan.day)}<span class="sub">${G.closingOf(plan.day)}・予定</span></td>
       <td class="num">${plan.due.length}件</td><td class="num">${plan.due.length ? yen(sum(plan.due, (l) => l.principal)) : '—'}</td><td colspan="4" class="muted">締めの日の終わりに計上</td></tr>`;
     return `<section class="panel">
-      <header class="panel-h"><h2>損益（純利）</h2><span class="sub">目標：最終日${lastDay()}の締めのあとの純利 ${yen(goal)}</span>
+      <header class="panel-h"><h2>損益</h2><span class="sub">目標 ${yen(goal)}（${lastDay()}の締め後）</span>
         <button class="link right" data-act="period-open">期間・目標を変える</button></header>
       ${plLine(p)}
       <div class="stat-row four tight">
@@ -1508,16 +1520,16 @@
             <thead><tr><th>項目</th><th class="num">件数</th><th class="num">金額</th></tr></thead>
             <tbody>${costRows}</tbody>
             <tfoot><tr><th>合計</th><th class="num">${s.costs.length}件</th><th class="num">${yen(p.expenses)}</th></tr></tfoot></table></div></div>
-        <div><h3 class="sec">締めの記録 <span class="sub">15日・月末</span></h3>
+        <div><h3 class="sec">締めの記録</h3>
           <div class="table-wrap"><table class="data compact">
             <thead><tr><th>締め日</th><th class="num">不渡り</th><th class="num">不渡り元金</th><th class="num">総売上</th><th class="num">経費</th><th class="num">不渡り累計</th><th class="num">純利</th></tr></thead>
             <tbody>${closeRows}${nextRow}</tbody></table></div>
           <p class="help">総売上・経費・不渡り累計・純利は、その締めの時点の累計です。</p></div>
       </div>
-      ${p.adjCash || p.adjPrincipal || s.edits.length ? `<h3 class="sec">手で直した記録 <span class="sub">${s.edits.length}件</span></h3>
+      ${p.adjCash || p.adjPrincipal || s.edits.length ? `<h3 class="sec">修正記録 <span class="sub">${s.edits.length}件</span></h3>
         ${p.adjCash || p.adjPrincipal ? `<p class="verdict warn">帳簿の差額（手で直した分・純利には入れていません）：手持ち資金 ${p.adjCash >= 0 ? '+' : ''}${signedYen(p.adjCash)}・元金残高 ${p.adjPrincipal >= 0 ? '+' : ''}${signedYen(p.adjPrincipal)}</p>` : ''}
         <details class="history"><summary>修正の一覧を見る</summary><ul class="log small">${s.edits.slice().reverse().map((e) => `<li class="edit"><span class="day">${G.fmtDay(e.day)}</span>${esc(e.text)}</li>`).join('')}</ul></details>` : ''}
-      <h3 class="sec">不渡りの予定 <span class="sub">夜逃げして連絡がつかない客</span></h3>
+      <h3 class="sec">不渡りの予定</h3>
       ${plan.due.length || plan.later.length ? fuwatariTableHtml(plan) : '<p class="empty">連絡がつかない客はいません。</p>'}
       <p class="help">総売上は、回収したジャンプ金（利息）・振込手数料（元金から天引きした分）・回収した延滞金・雑収入（不明入金からの振替）・口座の転売益の合計で、返ってきた元金は売上に入れません。経費は身辺調査費・罰金・チラシ代。不渡りは、期日から2週間以上遅れて連絡がつかない客の元金を、15日と月末の締めで計上した額です。純利 ＝ 総売上 − 経費 − 不渡り。</p>
     </section>`;
@@ -1560,7 +1572,7 @@
         <div><span class="no">顧客カルテ ・ No.${esc(c.id)}</span><h2>${esc(c.name)}<small>${esc(c.kana)}</small></h2></div>
         ${badge(r.status)}
         ${c.deleted ? '' : `<button class="ghost small" data-act="cust-edit" data-id="${esc(c.id)}">編集</button>`}
-        <button class="close" data-act="close-drawer" aria-label="閉じる">×</button>
+        <button class="close" data-act="close-drawer" aria-label="閉じる">${icon('x')}</button>
       </header>
       ${c.deleted ? `<p class="verdict warn">台帳から外した客です。取引の記録だけ残しています。<button class="link" data-act="cust-restore" data-id="${esc(c.id)}">台帳に戻す</button></p>` : ''}
       <div class="stat-row three tight">
@@ -1685,7 +1697,7 @@
     return `
       <header class="drawer-h">
         <div><span class="no">${isNew ? `顧客の追加 ・ No.${String(s.nextCustomerNo).padStart(3, '0')}` : `顧客カルテの編集 ・ No.${esc(c.id)}`}</span><h2>${isNew ? '新しい顧客' : esc(c.name)}</h2></div>
-        <button class="close" data-act="close-drawer" aria-label="閉じる">×</button>
+        <button class="close" data-act="close-drawer" aria-label="閉じる">${icon('x')}</button>
       </header>
       <form id="cust-form" class="cust-form" novalidate>
         <h3 class="sec">基本情報</h3>
@@ -1739,7 +1751,7 @@
           <label class="check wide"><input type="checkbox" name="refused" ${p.refused ? 'checked' : ''}> 断った客（来店予定を入れない限り、もう来ない）</label>
           <label class="check wide"><input type="checkbox" name="accountBought" ${p.accountBought ? 'checked' : ''}> 口座を買い取り済み（1人1通まで。外すと、また買い取れる）</label>
         </div>`}
-        <h3 class="sec">ゲームの設定（身辺調査で分かる本当の情報）</h3>
+        <h3 class="sec">調査情報</h3>
         ${isNew
           ? `<label class="check"><input type="checkbox" name="auto" checked> おまかせ（本当の月収・弱み・逃げ足などを自動で決める。身辺調査するまで分からない）</label>
              <div id="secret-fields" hidden>${secret}</div>`
@@ -1793,10 +1805,10 @@
     return `
       <header class="drawer-h">
         <div><span class="no">貸付の編集 ・ No.${l.id}</span><h2>${c ? esc(c.name) : ''}</h2></div>
-        <button class="close" data-act="close-drawer" aria-label="閉じる">×</button>
+        <button class="close" data-act="close-drawer" aria-label="閉じる">${icon('x')}</button>
       </header>
       <form id="loan-form" class="cust-form" novalidate data-lent0="${l.lent}" data-principal0="${l.principal}">
-        <h3 class="sec">受付表記（①〜⑤）</h3>
+        <h3 class="sec">受付表記</h3>
         <div class="grid2">
           ${fld('① 元金-完済金（万円）', `<input name="notation" class="text-input" value="${esc(G.notationOf(l.lent, l.payoff0))}">`, '元金を変えると、元金残高も同じだけ動きます（元金残高を手で直したときは除く）')}
           ${fld('② S', `<span class="unit-input"><input name="cycle" type="number" min="${G.CONFIG.minCycle}" max="${G.CONFIG.maxCycle}" value="${l.cycle}"><span>S</span></span>`)}
@@ -2090,7 +2102,7 @@
         ${G.isActive(l) ? `<button class="ghost small" data-act="pay-new" data-loan="${l.id}">入金を記録</button>` : ''}
         ${l.status === '延滞' ? accountBtn(l) : ''}
         <button class="ghost small" data-act="loan-edit" data-id="${l.id}">編集</button>
-        <button class="close" data-act="close-drawer" aria-label="閉じる">×</button>
+        <button class="close" data-act="close-drawer" aria-label="閉じる">${icon('x')}</button>
       </header>
       <div class="stat-row three tight">
         <div class="stat"><span>元金残高</span><b>${yen(l.principal)}</b></div>
@@ -2166,7 +2178,7 @@
       <div class="table-wrap"><table class="data compact">
         <thead><tr><th>客</th><th>最後の状態</th><th class="num">貸した総額</th><th class="num">ジャンプ金累計</th><th class="num">回収済元金</th><th class="num">不渡り</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
-      <p class="actions" style="margin-top:16px">
+      <p class="actions result-actions">
         ${s.over.byTime ? '<button class="primary" data-act="period-open">期間を延ばして続ける</button>' : ''}
         <button class="${s.over.byTime ? 'ghost' : 'primary'}" data-act="restart">もう一度（別の展開）</button>
         <button class="ghost" data-act="close-result">帳簿を見返す</button>
