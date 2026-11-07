@@ -485,14 +485,14 @@
     const goal = s.goal;
     const plan = G.fuwatariPlan(s);
     const police = Math.min(100, s.police);
-    $('#period-label').textContent = `${G.fmtDay(1)}〜${G.fmtDay(s.days)}（${s.days}日）`;
+    $('#period-label').textContent = `${s.day}日目 / ${s.days}日（${G.fmtDay(1)}〜${G.fmtDay(s.days)}）`;
+    $('#hero-title').textContent = G.fmtDayLong(s.day);
     $('#kpis').innerHTML = `
-      <div><dt>営業日</dt><dd>${G.fmtDay(s.day)}<small>${s.day}/${s.days}日目</small></dd></div>
       <div><dt>手持ち資金</dt><dd>${yen(s.cash)}</dd></div>
       <div><dt>貸付総元金</dt><dd>${yen(t.balance)}<small>${t.active + t.fledCount}件</small></dd></div>
-      <div><dt>次の締め</dt><dd>${G.fmtDay(plan.day)}<small>${plan.due.length ? `不渡り見込み${plan.due.length}件` : G.closingOf(plan.day)}</small></dd></div>
       <div class="wide"><dt>純利 / 目標</dt><dd class="${p.net < 0 ? 'neg' : ''}">${signedYen(p.net)}<small>/ ${yen(goal)}</small></dd>
         <div class="meter goal"><i style="width:${Math.max(0, Math.min(100, (p.net / goal) * 100))}%"></i></div></div>
+      <div><dt>次の締め</dt><dd>${G.fmtDay(plan.day)}<small>${plan.due.length ? `不渡り見込み${plan.due.length}件` : G.closingOf(plan.day)}</small></dd></div>
       <div><dt>凄み</dt><dd class="sugomi" title="取り立ての成功率が上がり、夜逃げされにくくなる">${stars(s.sugomi)}</dd></div>
       <div><dt>警察の目</dt><dd>${police}<small>/ 100</small></dd>
         <div class="meter police ${police >= G.CONFIG.raidPolice ? 'hot' : ''}"><i style="width:${police}%"></i></div></div>`;
@@ -534,7 +534,7 @@
     skip.disabled = !!s.visitor || !!s.over || s.day >= s.days;
     skip.title = overdue ? '延滞客がいる間は、早送りしても1日ずつ進みます' : '来店・延滞が出た期日・締め・延滞中の客のない日を飛ばして進めます（客がジャンプ・完済しただけの期日では止まりません）';
     btn.innerHTML = s.over ? '結果をもう一度見る' : `${s.day >= s.days ? '勝負の結果を見る' : '1日を終える'}${icon('arrow-right')}`;
-    let hint = `${G.fmtDayLong(s.day)}`;
+    let hint = '';
     if (s.visitor) hint = '来店した客に、貸すか断るかを決めてください（本日の業務）';
     else if (overdue && !s.nightUsed) hint = '延滞客がいます。取り立てずに終えることもできます（延滞客がいる間は、早送りも1日ずつ）';
     if (!s.visitor && !s.over && G.closingOf(s.day)) hint = `今日は${G.closingOf(s.day)}の締め日。1日を終えると、期日から2週間以上遅れて連絡がつかない客を不渡りにします`;
@@ -580,7 +580,7 @@
       </div>
       ${plLine(G.pl(s))}
       ${fuwatariNoticeHtml()}
-      ${G.totals(s).accountStockCount ? `<p class="help lead">転売待ちの口座が${G.totals(s).accountStockCount}件あります。<button class="link" data-act="tab" data-view="loans">元金表の「口座の在庫」で転売する</button></p>` : ''}
+      ${G.totals(s).accountStockCount ? `<p class="help lead">転売待ちの口座が${G.totals(s).accountStockCount}件あります。<button class="link" data-act="tab" data-view="loans">元金表の「口座の在庫」で転売する${icon('chevron-right')}</button></p>` : ''}
       ${pendingHtml()}
       <div class="cols">
         <div class="col">
@@ -594,7 +594,7 @@
           </section>
           <section class="panel">
             <header class="panel-h"><h2>本日の入金</h2><span class="sub">${G.fmtDay(s.day)}</span>
-              <span class="btns right"><button class="ghost small" data-act="pay-new">${icon('plus')}入金を記録</button><button class="link" data-act="tab" data-view="payments">入金台帳で見る</button></span></header>
+              <span class="btns right"><button class="ghost small" data-act="pay-new">${icon('plus')}入金を記録</button><button class="link" data-act="tab" data-view="payments">入金台帳で見る${icon('chevron-right')}</button></span></header>
             ${paymentsTableHtml(paymentRows().filter((r) => r.day === s.day), true)}
           </section>
         </div>
@@ -609,7 +609,7 @@
               <ul class="log small">${logItems(history, true) || '<li class="info">まだ記録はありません。</li>'}</ul></details>
           </section>
           <section class="panel">
-            <header class="panel-h"><h2>今後7日の支払い予定</h2><button class="link" data-act="tab" data-view="calendar">カレンダーで見る</button></header>
+            <header class="panel-h"><h2>今後7日の支払い予定</h2><button class="link" data-act="tab" data-view="calendar">カレンダーで見る${icon('chevron-right')}</button></header>
             ${upcomingHtml()}
           </section>
         </div>
@@ -622,7 +622,7 @@
     const known = open.filter((u) => u.revealed);
     return `<section class="panel notice">
       <header class="panel-h"><h2>不明入金</h2><span class="sub">未充当 ${open.length}件・${yen(sum(open, G.unknownLeft))}${known.length ? `（うち持ち主が判明 ${known.length}件）` : ''}</span>
-        <button class="link right" data-act="tab" data-view="loans">元金表で一覧を見る</button></header>
+        <button class="link right" data-act="tab" data-view="loans">元金表で一覧を見る${icon('chevron-right')}</button></header>
       ${unknownTableHtml(open)}
     </section>`;
   }
@@ -638,7 +638,7 @@
       : `次の締めは${G.fmtDay(plan.day)}（${G.closingOf(plan.day)}）`;
     return `<section class="panel notice danger">
       <header class="panel-h"><h2>不渡りの予定</h2><span class="sub">${head}</span>
-        <button class="link right" data-act="tab" data-view="loans">元金表で損益を見る</button></header>
+        <button class="link right" data-act="tab" data-view="loans">元金表で損益を見る${icon('chevron-right')}</button></header>
       ${plan.due.length || plan.later.length ? fuwatariTableHtml(plan) : '<p class="empty">連絡がつかない客はいません。今回の締めで不渡りになる貸付はありません。</p>'}
       <p class="help">期日から2週間以上遅れて連絡がつかない（夜逃げした）客は、15日と月末の締めで不渡りにして、元金を貸付総元金から引きます。${plan.due.length ? `今回は${plan.due.length}件・元金${yen(sumP(plan.due))}が純利から引かれます。` : ''}</p>
     </section>`;
