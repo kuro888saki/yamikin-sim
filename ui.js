@@ -627,7 +627,7 @@
       <header class="panel-h"><h2>不渡りの予定</h2><span class="sub">${head}</span>
         <button class="link right" data-act="tab" data-view="loans">元金表で損益を見る</button></header>
       ${plan.due.length || plan.later.length ? fuwatariTableHtml(plan) : '<p class="empty">連絡がつかない客はいません。今回の締めで不渡りになる貸付はありません。</p>'}
-      <p class="help">期日から2週間以上遅れて連絡がつかない（夜逃げした）客は、15日と月末の締めで不渡りにして、元金を貸付総元金から引きます。${plan.due.length ? `今回は${plan.due.length}件・元金${yen(sumP(plan.due))}が純利から引かれます。` : ''}</p>
+      <p class="help">期日から2週間以上遅れて連絡がつかない（夜逃げした）客は、毎月末の締めで不渡りにして、元金を貸付総元金から引きます。${plan.due.length ? `今回は${plan.due.length}件・元金${yen(sumP(plan.due))}が純利から引かれます。` : ''}</p>
     </section>`;
   }
 
@@ -837,7 +837,7 @@
     if (s.over) return '<p class="empty">勝負は終わりました。</p>';
     if (!overdue.length) return '<p class="empty">延滞している客はいません。今夜はゆっくり休めます。</p>';
     if (s.nightUsed) return '<p class="empty">今夜はもう動きました。続きは明日の晩です。</p>';
-    return `<p class="help lead">夜逃げされると連絡がつかなくなり、期日から2週間を過ぎた締め（15日・月末）で元金が不渡りになります。</p>` + overdue.map((loan) => {
+    return `<p class="help lead">夜逃げされると連絡がつかなくなり、期日から2週間を過ぎた締め（月末）で元金が不渡りになります。</p>` + overdue.map((loan) => {
       const c = G.customerOf(s, loan.customerId);
       const known = s.people[c.id].investigated;
       const cmds = Object.entries(G.COMMANDS).map(([k, cmd]) => {
@@ -958,8 +958,8 @@
       return `<option value="${off}" ${ui.calMonth === off ? 'selected' : ''}>${x.year}年${x.month}月${off === G.monthOffsetOfDay(s.day) ? '（今月）' : ''}</option>`;
     }).join('');
     const note = ui.calMonth < 0 ? '開店前の月です'
-      : m.firstDay + m.daysInMonth - 1 > s.days ? `最終日${lastDay()}より後は、ジャンプし続けた場合の見込みです。15日と月末は締め日です`
-      : '日付を押すと、その日の入金予定者・貸付した債務者・入金者が一覧で出ます。15日と月末は締め日です';
+      : m.firstDay + m.daysInMonth - 1 > s.days ? `最終日${lastDay()}より後は、ジャンプし続けた場合の見込みです。月末は締め日です`
+      : '日付を押すと、その日の入金予定者・貸付した債務者・入金者が一覧で出ます。月末は締め日です';
     return `
       <div class="cal-layout">
         <section class="panel">
@@ -972,7 +972,7 @@
             <select id="cal-customer" class="right" aria-label="顧客で絞り込み"><option value="">すべての顧客</option>${opts}</select>
           </header>
           <p class="help cal-note">${note}</p>
-          <div class="cal-legend"><span class="chip due">入金予定（ジャンプ金）</span><span class="chip in">入金</span><span class="chip out">貸付</span><span class="chip unk">不明入金</span><span class="chip bad">延滞・夜逃げ</span><span class="chip closing">締め（15日・月末）</span></div>
+          <div class="cal-legend"><span class="chip due">入金予定（ジャンプ金）</span><span class="chip in">入金</span><span class="chip out">貸付</span><span class="chip unk">不明入金</span><span class="chip bad">延滞・夜逃げ</span><span class="chip closing">締め（月末）</span></div>
           <div class="cal-grid">
             ${['日', '月', '火', '水', '木', '金', '土'].map((w, i) => `<div class="cal-w ${i === 0 ? 'sun' : i === 6 ? 'sat' : ''}">${w}</div>`).join('')}
             ${cells.join('')}
@@ -1508,7 +1508,7 @@
             <thead><tr><th>項目</th><th class="num">件数</th><th class="num">金額</th></tr></thead>
             <tbody>${costRows}</tbody>
             <tfoot><tr><th>合計</th><th class="num">${s.costs.length}件</th><th class="num">${yen(p.expenses)}</th></tr></tfoot></table></div></div>
-        <div><h3 class="sec">締めの記録 <span class="sub">15日・月末</span></h3>
+        <div><h3 class="sec">締めの記録 <span class="sub">毎月末</span></h3>
           <div class="table-wrap"><table class="data compact">
             <thead><tr><th>締め日</th><th class="num">不渡り</th><th class="num">不渡り元金</th><th class="num">総売上</th><th class="num">経費</th><th class="num">不渡り累計</th><th class="num">純利</th></tr></thead>
             <tbody>${closeRows}${nextRow}</tbody></table></div>
@@ -1519,7 +1519,7 @@
         <details class="history"><summary>修正の一覧を見る</summary><ul class="log small">${s.edits.slice().reverse().map((e) => `<li class="edit"><span class="day">${G.fmtDay(e.day)}</span>${esc(e.text)}</li>`).join('')}</ul></details>` : ''}
       <h3 class="sec">不渡りの予定 <span class="sub">夜逃げして連絡がつかない客</span></h3>
       ${plan.due.length || plan.later.length ? fuwatariTableHtml(plan) : '<p class="empty">連絡がつかない客はいません。</p>'}
-      <p class="help">総売上は、回収したジャンプ金（利息）・振込手数料（元金から天引きした分）・回収した延滞金・雑収入（不明入金からの振替）・口座の転売益の合計で、返ってきた元金は売上に入れません。経費は身辺調査費・罰金・チラシ代。不渡りは、期日から2週間以上遅れて連絡がつかない客の元金を、15日と月末の締めで計上した額です。純利 ＝ 総売上 − 経費 − 不渡り。</p>
+      <p class="help">総売上は、回収したジャンプ金（利息）・振込手数料（元金から天引きした分）・回収した延滞金・雑収入（不明入金からの振替）・口座の転売益の合計で、返ってきた元金は売上に入れません。経費は身辺調査費・罰金・チラシ代。不渡りは、期日から2週間以上遅れて連絡がつかない客の元金を、毎月末の締めで計上した額です。純利 ＝ 総売上 − 経費 − 不渡り。</p>
     </section>`;
   }
 
@@ -2200,7 +2200,7 @@
       <form id="period-form" class="terms" novalidate>
         <div class="field"><label for="period-end">最終日</label>
           <select id="period-end">${opts}</select>
-          <p class="help">最終日は締め日（15日か月末）から選びます。最後の締めで不渡りを計上してから、純利で勝ち負けを決めるためです。</p></div>
+          <p class="help">最終日は締め日（月末）から選びます。最後の締めで不渡りを計上してから、純利で勝ち負けを決めるためです。</p></div>
         <div class="field"><label for="period-goal">目標の純利</label>
           ${yenBox('id="period-goal"', Number.isFinite(ui.period.goal) ? ui.period.goal : '')}
           <p class="help">この期間の標準は${yen(std)}（客を丁寧に調べて、返せる範囲で貸したときに7割ほど届く額）。<button type="button" class="link" data-act="period-std">標準にする</button></p></div>
