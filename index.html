@@ -4,47 +4,34 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>小口金融 顧客管理システム</title>
-  <link rel="stylesheet" href="style.css?v=18">
+  <link rel="stylesheet" href="style.css?v=19">
 </head>
 <body>
-  <header class="globalnav">
-    <div class="gn-inner">
-      <span class="gn-brand">小口金融</span>
-      <div class="gn-links">
-        <button class="gn-link" data-act="shop-edit" title="手持ち資金・凄み・警察の目を直す">店の数字</button>
-        <button class="gn-link" data-act="period-open" title="期間（最終日）と目標の純利を変える">期間・目標</button>
-        <button class="gn-link" data-act="reset" title="台帳を読み直して1日目からやり直す">最初から</button>
-      </div>
+  <header class="top">
+    <div class="brand">
+      <span class="shop">小口金融</span>
+      <h1>顧客管理システム<small id="period-label"></small></h1>
+    </div>
+    <dl class="kpis" id="kpis"></dl>
+    <div class="top-actions">
+      <button class="ghost on-dark" data-act="shop-edit" title="手持ち資金・凄み・警察の目を直す">店の数字</button>
+      <button class="ghost on-dark" data-act="period-open" title="期間（最終日）と目標の純利を変える">期間・目標</button>
+      <button class="ghost on-dark" data-act="reset" title="台帳を読み直して1日目からやり直す">最初から</button>
     </div>
   </header>
 
-  <nav class="localnav" aria-label="画面の切り替え">
-    <div class="ln-inner">
-      <span class="ln-title">顧客管理システム</span>
-      <div class="tabs" id="tabs"></div>
-      <div class="ln-actions">
-        <button class="ln-link" id="skip" data-act="skip">早送り<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m6 17 5-5-5-5"/><path d="m13 17 5-5-5-5"/></svg></button>
-        <button class="primary pill" id="end" data-act="end">1日を終える<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></button>
-      </div>
-    </div>
-  </nav>
+  <nav class="tabs" id="tabs" aria-label="画面の切り替え"></nav>
 
-  <section class="hero" aria-label="今日の数字">
-    <div class="hero-inner">
-      <p class="eyebrow" id="period-label"></p>
-      <h1 class="hero-title" id="hero-title"></h1>
-      <p class="hero-sub" id="hint"></p>
-      <dl class="kpis" id="kpis"></dl>
-    </div>
-  </section>
-
-  <div class="page">
-    <main class="view" id="view"></main>
-  </div>
+  <main class="view" id="view"></main>
 
   <div class="scrim" id="scrim" data-act="close-drawer" hidden></div>
   <aside class="drawer" id="drawer" tabindex="-1" aria-label="詳細" hidden></aside>
 
+  <footer class="bar">
+    <span class="hint" id="hint"></span>
+    <button class="ghost" id="skip" data-act="skip">早送り ▶▶</button>
+    <button class="primary" id="end" data-act="end">1日を終える ▶</button>
+  </footer>
 
   <div class="overlay" id="result" hidden>
     <div class="sheet" id="result-body"></div>
@@ -85,6 +72,6 @@
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script src="logic.js?v=16"></script>
-  <script src="ui.js?v=18"></script>
+  <script src="ui.js?v=19"></script>
 </body>
 </html>
